@@ -4,7 +4,7 @@ A Zero-Trust Payment Protocol built for AI Agents using the [Model Context Proto
 
 **What makes it different:**
 - 🔐 **Zero-trust** — AI never sees PAN, CVV, or expiry. Card data exists only in RAM, injected via Playwright, then wiped.
-- 🌐 **Web3 + Fiat** — Auto-detects crypto checkout (EIP-681) and routes to on-chain USDT transfer. Falls back to JIT Visa for fiat.
+- 🌐 **Web3 + Fiat** — Auto-detects crypto checkout (EIP-681) and routes to a gasless USDC transfer on Base (Coinbase Paymaster). Falls back to JIT Visa for fiat.
 - 🧠 **Smart Routing** — Cloud Knowledge Base (`get_merchant_hints`) provides platform-specific checkout playbooks for Shopify, Etsy, WooCommerce, and more.
 - 🔄 **Self-Healing** — Failed checkouts are logged via `report_checkout_fail` for admin review, improving future success rates.
 
@@ -86,7 +86,7 @@ Get your Passport Key at: **[clawcard.store/dashboard/agents](https://www.clawca
 |------|-------------|
 | `list_cards` | List all virtual card aliases and balances |
 | `check_balance` | Check spendable USD balance for a card alias |
-| `get_deposit_addresses` | Get crypto deposit addresses (EVM + Tron) to top up balance |
+| `get_deposit_addresses` | Get your Base deposit address to top up with USDC (stablecoin on Base) |
 | `set_api_key` | Activate a new Passport Key instantly, no restart needed |
 | `show_api_key_status` | Check if a Passport Key is currently loaded (prefix only) |
 

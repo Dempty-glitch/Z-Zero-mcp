@@ -147,7 +147,7 @@ server.tool(
 // ============================================================
 server.tool(
     "get_deposit_addresses",
-    "Get crypto deposit addresses (EVM + Tron) to top up wallet balance.",
+    "Get your Base deposit address to top up your wallet with USDC (or any supported stablecoin on Base).",
     {},
     async () => {
         const data = await getDepositAddressesRemote();
@@ -163,33 +163,31 @@ server.tool(
             };
         }
 
-        // ── WDK Non-Custodial Mode ────────────────────────────────────────────
+        // ── Base smart-account wallet ─────────────────────────────────────────
         if (data?.wdk_wallet?.address) {
-            const wdkAddr = data.wdk_wallet.address;
+            const walletAddr = data.wdk_wallet.address;
             const balance = data.wdk_wallet.balance_usdt ?? 0;
-            const tronAddr = data.wdk_wallet.tron_address;
             return {
                 content: [{
                     type: "text" as const,
                     text: JSON.stringify({
-                        wallet_type: "non-custodial (WDK)",
-                        balance_usdt: balance,
+                        wallet_type: "Base smart account",
+                        balance_usdc: balance,
                         supported_chains: [
-                            { chain: "Ethereum", token: "USDT", address: wdkAddr },
-                            ...(tronAddr ? [{ chain: "Tron", token: "USDT", address: tronAddr }] : []),
+                            { chain: "Base", token: "USDC", address: walletAddr },
                         ],
-                        instructions: `Send USDT (Ethereum ERC-20) to: ${wdkAddr}${tronAddr ? `\nSend USDT (Tron TRC-20) to: ${tronAddr}` : ''}`,
-                        note: "Gasless payments via ERC-4337 Paymaster (Ethereum) / GasFree (Tron)."
+                        instructions: `Send USDC (or any supported stablecoin) on Base to: ${walletAddr}`,
+                        note: "Gasless spending via the Coinbase Paymaster on Base."
                     }, null, 2),
                 }],
             };
         }
 
-        // No WDK wallet connected
+        // No Base wallet connected
         return {
             content: [{
                 type: "text" as const,
-                text: "No WDK wallet found. Please create one at https://www.clawcard.store/dashboard/agent-wallet",
+                text: "No Base wallet found. Please create one at https://www.clawcard.store/dashboard/agent-wallet",
             }],
             isError: true,
         };
@@ -765,9 +763,9 @@ server.tool(
                 return {
                     content: [{ type: "text" as const, text: JSON.stringify({
                         route: "WEB3", method: web3Result.method, status: "SUCCESS",
-                        recipient: to, amount_usdt: amount, tx_hash: txResult.txHash,
-                        message: `✅ Web3 payment sent on-chain! ${amount} USDT → ${to}.`,
-                        gas_savings: "~$0.001 (ERC-4337 Paymaster, gasless for user)",
+                        recipient: to, amount_usdc: amount, tx_hash: txResult.txHash,
+                        message: `✅ Web3 payment sent on-chain! ${amount} USDC → ${to}.`,
+                        gas_savings: "~$0.001 (Coinbase Paymaster on Base, gasless for user)",
                     }, null, 2) }],
                 };
             }
@@ -909,7 +907,7 @@ Tools: \`check_balance\`, \`list_cards\`, \`get_deposit_addresses\`, \`set_api_k
 Before ANY purchase:
 1. Confirm exactly what the user wants to buy and the expected price (in USD).
 2. Call \`check_balance\` using your default \`card_alias\` to verify sufficient funds.
-   - If balance is insufficient → STOP. Ask the human to deposit USDT to their wallet.
+   - If balance is insufficient → STOP. Ask the human to deposit USDC (stablecoin on Base) to their wallet.
 3. Use \`list_cards\` to see available card aliases, NOT to check spendable balance.
 4. Never ask for the API key proactively — only call \`set_api_key\` when the user explicitly gives you one.
 
@@ -952,7 +950,7 @@ Tools: \`auto_pay_checkout\`, \`get_merchant_hints\`
 
 ### Option A — Digital Goods / SaaS / APIs (Use auto_pay_checkout directly)
 For pages where the final total is already visible, call \`auto_pay_checkout\`:
-- It auto-detects Web3 (sends USDT on-chain via WDK) vs Fiat (issues JIT Visa card + auto-fills form).
+- It auto-detects Web3 (sends USDC on Base, gasless) vs Fiat (issues JIT Visa card + auto-fills form).
 - One call handles everything.
 
 ### Option B — Physical Goods (Shopify, Etsy, WooCommerce)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// OpenClaw MCP Server (z-zero-mcp-server) v1.1.0
+// Z-Zero MCP Server (z-zero-mcp-server) — version from package.json (see CURRENT_MCP_VERSION)
 // Exposes secure JIT payment tools to AI Agents via Model Context Protocol
-// Status: Connected to Z-ZERO Gateway — produces secure JIT virtual cards
+// Status: Connected to Z-ZERO Gateway — JIT virtual cards + gasless USDC on Base
 
 export { CURRENT_MCP_VERSION } from "./version.js";
 import { CURRENT_MCP_VERSION } from "./version.js";
@@ -295,7 +295,7 @@ server.tool(
             .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
     },
     async ({ domain }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             const resp = await fetch(`${ZZERO_API}/api/checkout-hints?domain=${encodeURIComponent(domain)}&fields=merchant`, {
@@ -591,7 +591,7 @@ server.tool(
         }
 
         // Step 2: Validate new key against Dashboard API before swapping
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         try {
             const resp = await fetch(`${ZZERO_API}/api/wdk/balance`, {
                 headers: {
@@ -680,7 +680,7 @@ server.tool(
             .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
     },
     async ({ checkout_url, card_alias }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const API_KEY = getPassportKey();  // ✅ FIX: use hot-swap key store, not process.env
 
         if (!API_KEY) {
@@ -857,7 +857,7 @@ server.tool(
             .describe("Brief description of what went wrong, e.g. 'Could not find card number field' or 'Page redirected to CAPTCHA'."),
     },
     async ({ url, error_type, error_message }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             await fetch(`${ZZERO_API}/api/checkout-hints`, {
@@ -1001,9 +1001,9 @@ If you started Group 3 (called \`get_merchant_hints\` and began following \`pre_
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error(`🔐 OpenClaw MCP Server v${CURRENT_MCP_VERSION} running (Phase 2: Smart Routing enabled)...`);
+    console.error(`🔐 Z-Zero MCP Server v${CURRENT_MCP_VERSION} running (Base + USDC, gasless via Coinbase Paymaster)...`);
     console.error("Status: Secure & Connected to Z-ZERO Gateway");
-    console.error("Tools: list_cards, check_balance, request_payment_token, execute_payment, cancel_payment_token, request_human_approval, auto_pay_checkout, report_checkout_fail");
+    console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, set_api_key, show_api_key_status");
 }
 
 main().catch(console.error);

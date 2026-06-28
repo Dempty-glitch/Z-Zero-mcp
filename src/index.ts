@@ -37,6 +37,13 @@ import { chromium } from "playwright";
 import { setPassportKey, getPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap support
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
 
+/** Masked, non-reconstructable hint for a secret key (for debug output only). */
+function maskKey(key: string): string {
+    if (!key) return "";
+    if (key.length <= 8) return "••••";
+    return `${key.slice(0, 4)}…${key.slice(-2)}`;
+}
+
 // ============================================================
 // CREATE MCP SERVER
 // ============================================================
@@ -659,7 +666,8 @@ server.tool(
                 text: JSON.stringify({
                     status: "SUCCESS",
                     message: `✅ ${result.message}`,
-                    active_key_prefix: trimmed.slice(0, 12) + "...",
+                    // Masked hint only — never echo a usable portion of the secret to the chat/model context.
+                    active_key_hint: maskKey(trimmed),
                     note: "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
                 }, null, 2),
             }],
@@ -682,7 +690,7 @@ server.tool(
                 type: "text" as const,
                 text: JSON.stringify({
                     configured: hasKey,
-                    key_prefix: hasKey ? key.slice(0, 12) + "..." : null,
+                    key_hint: hasKey ? maskKey(key) : null,
                     note: hasKey
                         ? "Key is active. Call set_api_key to update it."
                         : "No key configured. Call set_api_key with your Passport Key from https://www.clawcard.store/dashboard/agents",

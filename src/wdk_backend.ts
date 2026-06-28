@@ -246,5 +246,6 @@ export async function cancelTokenRemote(token: string): Promise<any> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function refundUnderspendRemote(token: string, actualSpent: number): Promise<void> {
-    console.log(`[WDK MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
+    // console.error (NOT console.log) — stdout is the MCP stdio transport; logging there corrupts the protocol.
+    console.error(`[WDK MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
 }

@@ -407,13 +407,13 @@ server.tool(
         // Step 2: Use Playwright to inject card into checkout form (with optional agent hints)
         const result = await fillCheckoutForm(checkout_url, cardData, undefined, hints as CheckoutHints | undefined);
 
-        // Step 3: Burn the token ONLY if payment succeeded
-        // If merchant declines → keep token ACTIVE so webhook decline flow can refund correctly
-        if (result.success) {
-            await burnTokenRemote(token);
-        } else {
-            // Payment failed — do NOT burn token
-            // Partner card issuer will fire a 'card.authorization.declined' webhook → refund handled there
+        // Step 3: Burn the token ONLY on a CONFIRMED payment (result.success === status 'confirmed').
+        // Every other outcome (declined / unconfirmed / not_submitted / no_fields / error) leaves the
+        // token UNBURNED so the funds stay recoverable. "Filled a field" is NOT a payment.
+        if (!result.success) {
+            // `declined` = merchant rejected → webhook refund flow handles it.
+            // Everything else = we couldn't prove a charge happened → funds stay locked, recoverable.
+            const isDeclined = result.status === 'declined';
             return {
                 content: [
                     {
@@ -421,9 +421,12 @@ server.tool(
                         text: JSON.stringify(
                             {
                                 success: false,
-                                message: result.message || "Payment was declined by merchant.",
+                                status: result.status,
+                                message: result.message || "Payment was not confirmed.",
                                 token_status: "ACTIVE",
-                                note: "Token NOT burned. Funds will be refunded automatically via webhook within minutes.",
+                                note: isDeclined
+                                    ? "Token NOT burned. Funds will be refunded automatically via the decline webhook within minutes."
+                                    : "Token NOT burned — no confirmed charge. If you are unsure whether the order went through, do NOT retry blindly (double-charge risk); verify the merchant, or call cancel_payment_token to release the funds.",
                             },
                             null,
                             2
@@ -434,8 +437,11 @@ server.tool(
             };
         }
 
+        // Confirmed — burn the token, passing the REAL receipt id if one was scraped.
+        await burnTokenRemote(token, result.receipt_id);
+
         // Step 4: Refund underspend if actual amount was less than token amount
-        if (actual_amount !== undefined && result.success) {
+        if (actual_amount !== undefined) {
             await refundUnderspendRemote(token, actual_amount);
         }
 
@@ -446,11 +452,12 @@ server.tool(
                     type: "text" as const,
                     text: JSON.stringify(
                         {
-                            success: result.success,
+                            success: true,
+                            status: "confirmed",
                             message: result.message,
                             receipt_id: result.receipt_id || null,
                             token_status: "BURNED",
-                            note: "Token has been permanently invalidated after this transaction.",
+                            note: "Token has been permanently invalidated after this confirmed transaction.",
                         },
                         null,
                         2
@@ -802,18 +809,25 @@ server.tool(
 
             // Fill Form (Reusing the same page!)
             const fillResult = await fillCheckoutForm(checkout_url, cardData, page);
+
+            // Burn ONLY on a confirmed charge. Any other outcome leaves the JIT token unburned
+            // so the locked funds are recoverable (cancel/expire/decline-webhook).
             if (fillResult.success) {
-                const burnOk = await burnTokenRemote(token.token);
+                const burnOk = await burnTokenRemote(token.token, fillResult.receipt_id);
                 if (!burnOk) console.error(`[WARN] Token burn failed for ${token.token} — manual check needed`);
+            } else {
+                // Release the freshly-issued JIT token so the price funds don't sit locked on a non-payment.
+                await cancelTokenRemote(token.token).catch(() => {});
             }
 
             return {
                 content: [{ type: "text" as const, text: JSON.stringify({
-                    route: "FIAT", status: fillResult.success ? "SUCCESS" : "FILL_FAILED",
+                    route: "FIAT",
+                    status: fillResult.success ? "SUCCESS" : (fillResult.status || "FILL_FAILED").toUpperCase(),
                     detected_price: totalPrice,
                     message: fillResult.success
-                        ? `✅ JIT card issued for $${totalPrice} and checkout filled.`
-                        : `❌ Fill failed: ${fillResult.message}`,
+                        ? `✅ Confirmed: JIT card issued for $${totalPrice} and order confirmed by merchant.`
+                        : `❌ Not confirmed (${fillResult.status}): ${fillResult.message} Token released.`,
                     receipt_id: fillResult.receipt_id || null,
                 }, null, 2) }],
                 isError: !fillResult.success,

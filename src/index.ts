@@ -770,7 +770,7 @@ server.tool(
 
                 const resp = await fetch(`${ZZERO_API}/api/wdk/transfer`, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json", "x-passport-key": API_KEY },
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}` },
                     body: JSON.stringify({ to, amount, card_alias }),
                 });
                 const txResult = await resp.json() as any;

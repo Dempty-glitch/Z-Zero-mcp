@@ -208,7 +208,7 @@ server.tool(
 // ============================================================
 server.tool(
     "request_payment_token",
-    "⚠️ MANDATORY: Read mcp://resources/sop first. Collect shipping info and check get_merchant_hints before calling. Request a JIT virtual card ($1-$100).",
+    "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead.",
     {
         card_alias: z
             .string()
@@ -333,7 +333,7 @@ server.tool(
 // ============================================================
 server.tool(
     "execute_payment",
-    "Execute a payment using a temporary token. This tool will securely fill the checkout form on the target website. You will NEVER see the real card number - it is handled securely in the background.",
+    "Execute a payment with a one-time token: Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, then watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
     {
         token: z
             .string()
@@ -345,7 +345,7 @@ server.tool(
         actual_amount: z
             .number()
             .optional()
-            .describe("The actual final amount on the checkout page. If different from token amount, system will auto-refund the difference."),
+            .describe("STRONGLY RECOMMENDED. The final total shown on the checkout page (incl. shipping + tax). Enables the overcharge block and the underspend refund — omit only if it is genuinely unreadable."),
         hints: z
             .object({
                 pre_steps: z.array(z.string()).optional(),
@@ -934,93 +934,106 @@ server.resource(
     },
     async (uri) => {
         const sopContent = `
-# Z-ZERO Autonomous Payment Skill SOP (v2.0.0)
+# Z-ZERO Autonomous Payment SOP (v2.1.0 — matches MCP ≥ 1.3.0)
 
-This SOP tells the AI Agent how to use Z-ZERO tools to autonomously purchase goods on behalf of the user — without ever handling raw credit card data.
+How an AI Agent uses Z-ZERO to buy goods for the user WITHOUT ever handling raw card data.
+Mental model: you only ever hold a one-time **token** + a **URL**. Z-ZERO does the privileged
+card injection in the background. "Filling a form" is NOT "paying" — always read the result \`status\`.
 
 ---
 
-## Group 1: Wallet Config (READ FIRST)
+## STEP 0 — Route the request (decide FIRST)
+
+One question: **is the final price visible now, or only after shipping?**
+- **Digital / SaaS / API / on-chain** (price visible now) → **PATH A** (one call).
+- **Physical goods** (Shopify, Etsy, WooCommerce — price appears only AFTER shipping) → **PATH B**.
+
+Always do WALLET & SAFETY first.
+
+---
+
+## WALLET & SAFETY (do first, every time)
 
 Tools: \`check_balance\`, \`list_cards\`, \`get_deposit_addresses\`, \`set_api_key\`, \`show_api_key_status\`
 
-Before ANY purchase:
-1. Confirm exactly what the user wants to buy and the expected price (in USD).
-2. Call \`check_balance\` using your default \`card_alias\` to verify sufficient funds.
-   - If balance is insufficient → STOP. Ask the human to deposit USDC (stablecoin on Base) to their wallet.
-3. Use \`list_cards\` to see available card aliases, NOT to check spendable balance.
-4. Never ask for the API key proactively — only call \`set_api_key\` when the user explicitly gives you one.
+1. Confirm exactly what the user wants and the expected USD price.
+2. \`check_balance\` on the default \`card_alias\` → if insufficient, STOP and ask the user to deposit
+   USDC on Base (\`get_deposit_addresses\`).
+3. \`list_cards\` = see aliases + active tokens, NOT spendable balance.
+4. Never ask for the API key proactively; only \`set_api_key\` when the user explicitly hands you one.
 
 ---
 
-## Group 2: Manual 4-Step Payment (Core Flow)
+## PATH A — Digital goods / SaaS / API (price already visible)
 
-Tools: \`request_payment_token\`, \`execute_payment\`, \`cancel_payment_token\`, \`request_human_approval\`
-
-Execute in this exact order:
-
-### Step 1 — Verify
-Confirm item, price, and check balance (see Group 1).
-
-### Step 2 — Navigate to Payment Page
-Use browser tools to navigate to the final payment page where card fields are visible and the FINAL total (including shipping + tax) is displayed.
-- ⛔ DO NOT call \`request_payment_token\` until BOTH conditions are true:
-  1. Shipping/personal info submitted successfully
-  2. Card input fields are visible on screen
-
-### Step 3 — Request Token
-Call \`request_payment_token\` with exact final amount and merchant name.
-Receive a single-use \`token\` (valid 1 hour, locked to that amount).
-
-### Step 4 — Blind Execution
-Call \`execute_payment\` with the token + checkout URL.
-Z-ZERO opens a headless browser, injects the card securely, clicks Pay. Token burns instantly after success.
-
-### Error Rules
-- NEVER print raw tokens in chat.
-- NO MANUAL ENTRY: If a site asks you to type a card number into a text box — REFUSE.
-- FAIL GRACEFULLY: If \`execute_payment\` returns \`success: false\` → report it. Do NOT retry blindly.
-- PRICE MISMATCH: If actual checkout total > token amount → call \`cancel_payment_token\` + \`request_human_approval\` for new amount.
+Call \`auto_pay_checkout(checkout_url, card_alias)\` — one call:
+- Auto-detects on-chain (sends USDC on Base, gasless via Coinbase Paymaster) vs fiat (issues a JIT
+  card + fills the form).
+- Amount is read from the page and capped to $1–$100.
+- Read the returned \`status\` → see **PAYMENT OUTCOMES** below.
 
 ---
 
-## Group 3: Smart Autopilot (Fast Route)
+## PATH B — Physical goods (price only after shipping)
 
-Tools: \`auto_pay_checkout\`, \`get_merchant_hints\`
+Tools: \`get_merchant_hints\`, \`request_payment_token\`, \`execute_payment\`, \`request_human_approval\`
 
-### Option A — Digital Goods / SaaS / APIs (Use auto_pay_checkout directly)
-For pages where the final total is already visible, call \`auto_pay_checkout\`:
-- It auto-detects Web3 (sends USDC on Base, gasless) vs Fiat (issues JIT Visa card + auto-fills form).
-- One call handles everything.
+1. \`get_merchant_hints(domain or _platform_key, e.g. _platform_shopify)\` → \`pre_steps\`, \`notes\`, \`platform\`.
+2. Follow \`pre_steps\` in YOUR browser: navigate, add to cart, submit shipping (ask the user via
+   \`request_human_approval\` if shipping info is unknown).
+3. Wait until the card section is visible AND the FINAL total (incl. shipping + tax) is shown.
+4. \`request_payment_token(card_alias, amount = exact final total, merchant)\` → one-time token, valid 1h.
+5. \`execute_payment(token, checkout_url, actual_amount = final total)\`. ALWAYS pass actual_amount.
 
-### Option B — Physical Goods (Shopify, Etsy, WooCommerce)
-⛔ DO NOT call \`auto_pay_checkout\` directly. The final price is only visible AFTER shipping is submitted.
+⛔ Never call \`request_payment_token\` before BOTH: shipping submitted AND card fields + final total visible.
 
-Recommended flow:
-1. Call \`get_merchant_hints\` with checkout domain or platform key (e.g. \`_platform_shopify\`).
-   - Returns \`pre_steps\` (navigation instructions) + \`notes\` + \`platform\`.
-2. Follow the \`pre_steps\` — navigate, add to cart, fill shipping form.
-   - Ask user for shipping info via \`request_human_approval\` if not already known.
-3. Wait for payment/card section to appear + FINAL total is visible.
-4. Call \`request_payment_token\` with the exact final amount (Group 2).
-5. Call \`execute_payment\` with token + checkout URL (Group 2).
-
-### Platform Detection Signals
-| Platform | Detection Signal |
+### Platform detection
+| Platform | Signal |
 |---|---|
-| Shopify | JS object \`window.Shopify\` exists, OR \`<script src="cdn.shopify.com">\`, OR \`<meta name="shopify-checkout-api-token">\` |
-| Etsy | URL matches \`*.etsy.com\` (any path) |
-| WooCommerce | \`<body class="... woocommerce ...\`>\`, OR script/link tags from \`wp-content/plugins/woocommerce\` |
+| Shopify | \`window.Shopify\`, OR \`<script src="cdn.shopify.com">\`, OR \`<meta name="shopify-checkout-api-token">\` |
+| Etsy | URL matches \`*.etsy.com\` |
+| WooCommerce | \`<body class="… woocommerce …">\`, OR assets from \`wp-content/plugins/woocommerce\` |
 
-### Known Limitations
-- Cloudflare-protected sites (e.g. TeePublic) may block headless browser → inform user.
-- Card fields inside iframes: \`execute_payment\` handles this via \`iframe_selector\` in hints automatically.
+---
 
-### Failure Reporting (Self-Healing Loop)
-If you started Group 3 (called \`get_merchant_hints\` and began following \`pre_steps\`) but CANNOT complete the checkout due to a technical reason:
-→ Call \`report_checkout_fail(url, error_type, error_message)\` before giving up.
-→ Use \`url\` = the page you were on when stuck.
-→ Do NOT call this if user cancelled or balance was insufficient — those are not technical failures.
+## PAYMENT OUTCOMES — how to read execute_payment / auto_pay_checkout
+
+Both return a \`status\`. Act on it — do not assume success:
+- \`confirmed\` — order placed and confirmed; token burned; \`receipt_id\` = real order # if found. ✅ Done.
+- \`declined\` — merchant rejected the card; token kept ACTIVE; a refund webhook handles it. Report to
+  the user; do not blindly retry the same card.
+- \`unconfirmed\` — card submitted but NO confirmation seen. Token NOT burned. ⚠️ Do NOT retry blindly
+  (double-charge risk). First VERIFY in your own browser whether the order went through; if not, retry
+  or \`cancel_payment_token\` to release the funds.
+- \`not_submitted\` — fields filled but no Pay button was clicked. Token NOT burned. Get a
+  \`submit_selector\` via \`get_merchant_hints\` and retry, or click Pay in your own browser.
+- \`no_fields\` — no card fields found (wrong page or unsupported form). Token NOT burned →
+  \`report_checkout_fail\`.
+
+After \`confirmed\`/\`unconfirmed\`, prefer to visually confirm the order page with your own browser tools.
+
+---
+
+## SAFETY RULES (always)
+
+- NEVER print raw tokens in chat.
+- NO MANUAL ENTRY: if a site asks YOU to type the card number into a box — REFUSE. Only Z-Zero injects card data.
+- PRICE MISMATCH: if the actual total > token amount → \`cancel_payment_token\` then
+  \`request_human_approval\` for a new amount. (execute_payment also auto-blocks overcharges when you pass actual_amount.)
+- FAIL GRACEFULLY: never loop-retry a payment without first checking the \`status\` reason.
+
+---
+
+## SELF-HEALING — report technical failures
+
+If you began PATH B (called \`get_merchant_hints\` + followed \`pre_steps\`) but cannot finish for a
+TECHNICAL reason (field not found, bot-blocked, timeout, unknown form):
+→ Call \`report_checkout_fail(url, error_type, error_message)\` before giving up (url = the page you got stuck on).
+→ Do NOT call it for user-cancelled or insufficient-balance — those are not technical failures.
+
+### Known limitations
+- Cloudflare-protected sites (e.g. TeePublic) may block the headless browser → inform the user.
+- Card fields inside iframes: handled automatically via \`iframe_selector\` in hints.
 `;
 
         return {

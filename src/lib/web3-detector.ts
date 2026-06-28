@@ -169,7 +169,7 @@ export async function detectWeb3Payment(
             detected: false,
             method: null,
             params: null,
-            message: "No Web3 payment gateway detected. Will proceed with JIT Visa Card (Fiat) route.",
+            message: "No Web3 payment gateway detected. Will proceed with JIT virtual card (Fiat) route.",
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -35,6 +35,7 @@ import { detectWeb3Payment } from "./lib/web3-detector.js";
 import { extractTotalPrice } from "./lib/extract-total-price.js";
 import { chromium } from "playwright";
 import { setPassportKey, getPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap support
+import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
 
 // ============================================================
 // CREATE MCP SERVER
@@ -353,6 +354,23 @@ server.tool(
             .describe("Optional hints from get_merchant_hints — selectors and pre-steps to guide Playwright. Use when default selectors fail or for complex multi-step checkouts."),
     },
     async ({ token, checkout_url, actual_amount, hints }) => {
+        // Step 0: SSRF / scheme guard BEFORE we drive a browser to this URL and inject a real PAN/CVV.
+        try {
+            assertSafeCheckoutUrl(checkout_url);
+        } catch (e) {
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: JSON.stringify({
+                        success: false,
+                        status: "blocked",
+                        message: `🚨 Refused to open checkout_url: ${e instanceof Error ? e.message : String(e)}`,
+                    }, null, 2),
+                }],
+                isError: true,
+            };
+        }
+
         // Step 1: Resolve token → card data (RAM only)
         const cardData = await resolveTokenRemote(token);
         if (cardData?.error === "AUTH_REQUIRED") {
@@ -690,6 +708,13 @@ server.tool(
         const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const API_KEY = getPassportKey();  // ✅ FIX: use hot-swap key store, not process.env
 
+        // Spend guard for the autonomous path. auto_pay derives the amount itself
+        // (scraped fiat total OR on-chain amount from an EIP-681 link / calldata), so there is
+        // no human-authorized token to cross-check against — this range IS the only amount guard.
+        // It bounds the blast radius if price extraction or a payment link is wrong/malicious.
+        const AUTO_PAY_MIN_USD = 1;
+        const AUTO_PAY_MAX_USD = 100;
+
         if (!API_KEY) {
             return {
                 content: [{ type: "text" as const, text: JSON.stringify({
@@ -700,28 +725,8 @@ server.tool(
             };
         }
 
-        // ── SSRF guard ───────────────────────────────────────────────
-        (() => {
-            let url: URL;
-            try { url = new URL(checkout_url); } catch {
-                throw new Error(`Invalid checkout_url: ${checkout_url}`);
-            }
-            const isDev = process.env.NODE_ENV !== "production";
-            const hostname = url.hostname;
-            if (!(isDev && (hostname === "localhost" || hostname === "127.0.0.1"))) {
-                if (url.protocol !== "https:") {
-                    throw new Error(`checkout_url must use HTTPS.`);
-                }
-                const privatePatterns = [
-                    /^localhost$/i, /^127\./, /^10\./,
-                    /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
-                    /^169\.254\./, /^\[::1\]$/, /^0\.0\.0\.0$/,
-                ];
-                if (privatePatterns.some(p => p.test(hostname))) {
-                    throw new Error(`SSRF blocked host: ${hostname}`);
-                }
-            }
-        })();
+        // ── SSRF guard (shared helper) ───────────────────────────────
+        assertSafeCheckoutUrl(checkout_url);
 
         // ── Single Browser Instance for efficiency ──────────────────
         const browser = await chromium.launch({ headless: true });
@@ -748,6 +753,18 @@ server.tool(
                             route: "WEB3", status: "AMOUNT_REQUIRED", recipient: to,
                             message: "Web3 detected but amount is unknown.",
                         }, null, 2) }],
+                    };
+                }
+
+                // Same spend guard as the fiat route — the on-chain amount comes from an
+                // untrusted EIP-681 link / calldata, so cap it before sending USDC.
+                if (amount < AUTO_PAY_MIN_USD || amount > AUTO_PAY_MAX_USD) {
+                    return {
+                        content: [{ type: "text" as const, text: JSON.stringify({
+                            route: "WEB3", status: "AMOUNT_OUT_OF_RANGE", recipient: to, detected_amount: amount,
+                            message: `🚨 BLOCKED: Web3 amount $${amount} is outside the allowed $${AUTO_PAY_MIN_USD}–$${AUTO_PAY_MAX_USD} range. No funds were sent.`,
+                        }, null, 2) }],
+                        isError: true,
                     };
                 }
 
@@ -790,10 +807,11 @@ server.tool(
                 };
             }
 
-            if (totalPrice < 1 || totalPrice > 100) {
+            if (totalPrice < AUTO_PAY_MIN_USD || totalPrice > AUTO_PAY_MAX_USD) {
                 return {
                     content: [{ type: "text" as const, text: JSON.stringify({
                         route: "FIAT", status: "AMOUNT_OUT_OF_RANGE", detected_price: totalPrice,
+                        message: `Detected total $${totalPrice} is outside the allowed $${AUTO_PAY_MIN_USD}–$${AUTO_PAY_MAX_USD} range.`,
                     }, null, 2) }],
                     isError: true,
                 };

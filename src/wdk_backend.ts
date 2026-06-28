@@ -60,10 +60,14 @@ async function internalApiRequest(endpoint: string, method: string, body: any) {
     }
     const url = `${API_BASE_URL.replace(/\/$/, '')}${endpoint}`;
     try {
+        // Two independent factors on these PAN/burn endpoints:
+        //  - x-internal-secret: coarse platform gate (shared deploy secret)
+        //  - Authorization: Bearer <Passport Key>: per-user identity → server enforces token ownership
         const res = await fetch(url, {
             method,
             headers: {
                 "x-internal-secret": INTERNAL_SECRET,
+                "Authorization": `Bearer ${getPassportKey()}`,
                 "Content-Type": "application/json",
                 "X-MCP-Version": CURRENT_MCP_VERSION,
             },

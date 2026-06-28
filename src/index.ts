@@ -987,6 +987,12 @@ Tools: \`get_merchant_hints\`, \`request_payment_token\`, \`execute_payment\`, \
 
 ⛔ Never call \`request_payment_token\` before BOTH: shipping submitted AND card fields + final total visible.
 
+⚠️ **Resumable URL required.** \`execute_payment\` opens its OWN fresh, cookieless browser at \`checkout_url\` —
+your own browsing session does NOT carry over. So \`checkout_url\` must reload the cart + final total + card
+fields on its own (e.g. a Shopify \`/checkouts/c/<token>\` or Etsy checkout-token URL). If it instead needs
+your logged-in session/cookies, the cold browser lands on an empty cart and you'll get \`no_fields\` — in that
+case finish the purchase in your own browser, or use a merchant whose checkout URL is self-resumable.
+
 ### Platform detection
 | Platform | Signal |
 |---|---|
@@ -1034,6 +1040,9 @@ TECHNICAL reason (field not found, bot-blocked, timeout, unknown form):
 ### Known limitations
 - Cloudflare-protected sites (e.g. TeePublic) may block the headless browser → inform the user.
 - Card fields inside iframes: handled automatically via \`iframe_selector\` in hints.
+- Cold browser: \`execute_payment\`/\`auto_pay_checkout\` run in a fresh cookieless browser, so the
+  checkout URL must be self-resumable (see "Resumable URL required" under PATH B). Cookie/session-bound
+  carts will return \`no_fields\`.
 `;
 
         return {

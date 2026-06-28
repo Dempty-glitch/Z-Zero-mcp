@@ -210,9 +210,24 @@ async function _fillCheckoutFormInner(
         // Prevents double-navigate which would reload page and lose cart/session state.
         const currentUrl = page.url();
         const baseCheckoutUrl = checkoutUrl.split("?")[0];
+        let landedUrl = currentUrl;
         if (!currentUrl || currentUrl === "about:blank" || !currentUrl.startsWith(baseCheckoutUrl)) {
+            // ⚠️ COLD BROWSER: execute_payment lands here with a fresh, COOKIELESS context — none of the
+            // agent's own browsing session carries over. This only works when checkout_url is RESUMABLE
+            // cold: the cart, final total and card fields must be reconstructable server-side from the URL
+            // alone (Shopify /checkouts/c/<token>, Etsy token URLs). For cookie/session-bound carts the
+            // page loads empty or redirects to /cart|/login and no card fields will be found.
             await page.goto(checkoutUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+            landedUrl = page.url();
         }
+        // Heuristic: did the cold load bounce off the intended checkout (cart/session not carried)?
+        const landedElsewhere = (() => {
+            try {
+                const want = new URL(checkoutUrl);
+                const got = new URL(landedUrl);
+                return got.host !== want.host || got.pathname.split("/")[1] !== want.pathname.split("/")[1];
+            } catch { return false; }
+        })();
 
         // ============================================================
         // STRATEGY 0: Pre-steps — click to open/reveal the payment form
@@ -486,7 +501,13 @@ async function _fillCheckoutFormInner(
                 success: false,
                 status: 'no_fields',
                 message:
-                    "Could not detect any credit card fields on this page. The checkout form may use an unsupported format.",
+                    "Could not detect any credit card fields on this page. " +
+                    (landedElsewhere
+                        ? `The checkout URL redirected to ${landedUrl} — the cart/session likely did not carry over. ` +
+                          "Z-Zero opens its OWN fresh browser, so checkout_url must be resumable on its own " +
+                          "(e.g. a Shopify/Etsy checkout-token URL), not a page that needs the agent's logged-in session. "
+                        : "") +
+                    "The checkout form may use an unsupported format, or the page requires a logged-in session.",
             };
         }
 

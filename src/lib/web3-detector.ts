@@ -8,10 +8,10 @@
 
 export interface Web3TxParams {
     to: string;          // recipient address (merchant wallet)
-    value?: string;      // ETH value in hex (usually 0 for USDT)
+    value?: string;      // ETH value in hex (usually 0 for USDC)
     data?: string;       // encoded calldata (ERC-20 transfer)
-    chainId?: number;    // detected chain ID (137 = Polygon)
-    eip681_amount?: number;  // USDT amount parsed from EIP-681 URL (if detected)
+    chainId?: number;    // detected chain ID (8453 = Base)
+    eip681_amount?: number;  // USDC amount parsed from EIP-681 URL (if detected)
 }
 
 export interface Web3DetectionResult {
@@ -38,15 +38,15 @@ export async function detectWeb3Payment(
             const mockEthereum = {
                 isMetaMask: true,
                 selectedAddress: "0x0000000000000000000000000000000000000001",
-                chainId: "0x89",
-                networkVersion: "137",
+                chainId: "0x2105",       // Base mainnet (8453)
+                networkVersion: "8453",
 
                 request: async ({ method, params }: { method: string; params?: unknown[] }) => {
                     if (method === "eth_requestAccounts" || method === "eth_accounts") {
                         return ["0x0000000000000000000000000000000000000001"];
                     }
-                    if (method === "eth_chainId") return "0x89";
-                    if (method === "net_version") return "137";
+                    if (method === "eth_chainId") return "0x2105";
+                    if (method === "net_version") return "8453";
                     if (method === "eth_sendTransaction") {
                         const tx = params?.[0] as Record<string, string>;
                         (window as unknown as Record<string, unknown>)["__wdkCapturedTx"] = tx;
@@ -59,7 +59,7 @@ export async function detectWeb3Payment(
                 },
 
                 on: (event: string, handler: (data: unknown) => void) => {
-                    if (event === "connect") setTimeout(() => handler({ chainId: "0x89" }), 100);
+                    if (event === "connect") setTimeout(() => handler({ chainId: "0x2105" }), 100);
                     if (event === "accountsChanged") setTimeout(() => handler(["0x0000000000000000000000000000000000000001"]), 200);
                 },
 
@@ -100,15 +100,15 @@ export async function detectWeb3Payment(
             return {
                 to: recipientMatch?.[1] ?? contractMatch?.[1] ?? null,
                 contract: contractMatch?.[1] ?? null,
-                chainId: chainMatch ? parseInt(chainMatch[1]) : 137,
+                chainId: chainMatch ? parseInt(chainMatch[1]) : 8453,
                 uint256: uint256Match?.[1] ?? null,
                 raw: href,
             };
         });
 
         if (eip681Result?.to) {
-            const usdtAmount = eip681Result.uint256
-                ? parseInt(eip681Result.uint256) / 1_000_000
+            const usdcAmount = eip681Result.uint256
+                ? parseInt(eip681Result.uint256) / 1_000_000   // USDC has 6 decimals
                 : null;
             return {
                 detected: true,
@@ -116,9 +116,9 @@ export async function detectWeb3Payment(
                 params: {
                     to: eip681Result.to,
                     chainId: eip681Result.chainId,
-                    eip681_amount: usdtAmount ?? undefined,
+                    eip681_amount: usdcAmount ?? undefined,
                 },
-                message: `EIP-681 payment link found. Merchant: ${eip681Result.to}, amount: ${usdtAmount} USDT.`,
+                message: `EIP-681 payment link found. Merchant: ${eip681Result.to}, amount: ${usdcAmount} USDC.`,
             };
         }
 
@@ -157,7 +157,7 @@ export async function detectWeb3Payment(
                         to: capturedTx["to"] as string,
                         value: capturedTx["value"] as string | undefined,
                         data: capturedTx["data"] as string | undefined,
-                        chainId: 137,
+                        chainId: 8453,
                     },
                     message: `Web3 payment detected via eth_sendTransaction. Recipient: ${capturedTx["to"]}`,
                 };

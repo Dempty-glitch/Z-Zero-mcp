@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// OpenClaw MCP Server (z-zero-mcp-server) v1.1.0
+// Z-Zero MCP Server (z-zero-mcp-server) — version from package.json (see CURRENT_MCP_VERSION)
 // Exposes secure JIT payment tools to AI Agents via Model Context Protocol
-// Status: Connected to Z-ZERO Gateway — produces secure JIT virtual cards
+// Status: Connected to Z-ZERO Gateway — JIT virtual cards + gasless USDC on Base
 
 export { CURRENT_MCP_VERSION } from "./version.js";
 import { CURRENT_MCP_VERSION } from "./version.js";
@@ -35,6 +35,14 @@ import { detectWeb3Payment } from "./lib/web3-detector.js";
 import { extractTotalPrice } from "./lib/extract-total-price.js";
 import { chromium } from "playwright";
 import { setPassportKey, getPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap support
+import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
+
+/** Masked, non-reconstructable hint for a secret key (for debug output only). */
+function maskKey(key: string): string {
+    if (!key) return "";
+    if (key.length <= 8) return "••••";
+    return `${key.slice(0, 4)}…${key.slice(-2)}`;
+}
 
 // ============================================================
 // CREATE MCP SERVER
@@ -147,7 +155,7 @@ server.tool(
 // ============================================================
 server.tool(
     "get_deposit_addresses",
-    "Get crypto deposit addresses (EVM + Tron) to top up wallet balance.",
+    "Get your Base deposit address to top up your wallet with USDC (or any supported stablecoin on Base).",
     {},
     async () => {
         const data = await getDepositAddressesRemote();
@@ -163,33 +171,31 @@ server.tool(
             };
         }
 
-        // ── WDK Non-Custodial Mode ────────────────────────────────────────────
+        // ── Base smart-account wallet ─────────────────────────────────────────
         if (data?.wdk_wallet?.address) {
-            const wdkAddr = data.wdk_wallet.address;
+            const walletAddr = data.wdk_wallet.address;
             const balance = data.wdk_wallet.balance_usdt ?? 0;
-            const tronAddr = data.wdk_wallet.tron_address;
             return {
                 content: [{
                     type: "text" as const,
                     text: JSON.stringify({
-                        wallet_type: "non-custodial (WDK)",
-                        balance_usdt: balance,
+                        wallet_type: "Base smart account",
+                        balance_usdc: balance,
                         supported_chains: [
-                            { chain: "Ethereum", token: "USDT", address: wdkAddr },
-                            ...(tronAddr ? [{ chain: "Tron", token: "USDT", address: tronAddr }] : []),
+                            { chain: "Base", token: "USDC", address: walletAddr },
                         ],
-                        instructions: `Send USDT (Ethereum ERC-20) to: ${wdkAddr}${tronAddr ? `\nSend USDT (Tron TRC-20) to: ${tronAddr}` : ''}`,
-                        note: "Gasless payments via ERC-4337 Paymaster (Ethereum) / GasFree (Tron)."
+                        instructions: `Send USDC (or any supported stablecoin) on Base to: ${walletAddr}`,
+                        note: "Gasless spending via the Coinbase Paymaster on Base."
                     }, null, 2),
                 }],
             };
         }
 
-        // No WDK wallet connected
+        // No Base wallet connected
         return {
             content: [{
                 type: "text" as const,
-                text: "No WDK wallet found. Please create one at https://www.clawcard.store/dashboard/agent-wallet",
+                text: "No Base wallet found. Please create one at https://www.clawcard.store/dashboard/agent-wallet",
             }],
             isError: true,
         };
@@ -202,7 +208,7 @@ server.tool(
 // ============================================================
 server.tool(
     "request_payment_token",
-    "⚠️ MANDATORY: Read mcp://resources/sop first. Collect shipping info and check get_merchant_hints before calling. Request a JIT virtual card ($1-$100).",
+    "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead.",
     {
         card_alias: z
             .string()
@@ -297,7 +303,7 @@ server.tool(
             .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
     },
     async ({ domain }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             const resp = await fetch(`${ZZERO_API}/api/checkout-hints?domain=${encodeURIComponent(domain)}&fields=merchant`, {
@@ -327,7 +333,7 @@ server.tool(
 // ============================================================
 server.tool(
     "execute_payment",
-    "Execute a payment using a temporary token. This tool will securely fill the checkout form on the target website. You will NEVER see the real card number - it is handled securely in the background.",
+    "Execute a payment with a one-time token: Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, then watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
     {
         token: z
             .string()
@@ -339,7 +345,7 @@ server.tool(
         actual_amount: z
             .number()
             .optional()
-            .describe("The actual final amount on the checkout page. If different from token amount, system will auto-refund the difference."),
+            .describe("STRONGLY RECOMMENDED. The final total shown on the checkout page (incl. shipping + tax). Enables the overcharge block and the underspend refund — omit only if it is genuinely unreadable."),
         hints: z
             .object({
                 pre_steps: z.array(z.string()).optional(),
@@ -355,6 +361,23 @@ server.tool(
             .describe("Optional hints from get_merchant_hints — selectors and pre-steps to guide Playwright. Use when default selectors fail or for complex multi-step checkouts."),
     },
     async ({ token, checkout_url, actual_amount, hints }) => {
+        // Step 0: SSRF / scheme guard BEFORE we drive a browser to this URL and inject a real PAN/CVV.
+        try {
+            assertSafeCheckoutUrl(checkout_url);
+        } catch (e) {
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: JSON.stringify({
+                        success: false,
+                        status: "blocked",
+                        message: `🚨 Refused to open checkout_url: ${e instanceof Error ? e.message : String(e)}`,
+                    }, null, 2),
+                }],
+                isError: true,
+            };
+        }
+
         // Step 1: Resolve token → card data (RAM only)
         const cardData = await resolveTokenRemote(token);
         if (cardData?.error === "AUTH_REQUIRED") {
@@ -409,13 +432,13 @@ server.tool(
         // Step 2: Use Playwright to inject card into checkout form (with optional agent hints)
         const result = await fillCheckoutForm(checkout_url, cardData, undefined, hints as CheckoutHints | undefined);
 
-        // Step 3: Burn the token ONLY if payment succeeded
-        // If merchant declines → keep token ACTIVE so webhook decline flow can refund correctly
-        if (result.success) {
-            await burnTokenRemote(token);
-        } else {
-            // Payment failed — do NOT burn token
-            // Partner card issuer will fire a 'card.authorization.declined' webhook → refund handled there
+        // Step 3: Burn the token ONLY on a CONFIRMED payment (result.success === status 'confirmed').
+        // Every other outcome (declined / unconfirmed / not_submitted / no_fields / error) leaves the
+        // token UNBURNED so the funds stay recoverable. "Filled a field" is NOT a payment.
+        if (!result.success) {
+            // `declined` = merchant rejected → webhook refund flow handles it.
+            // Everything else = we couldn't prove a charge happened → funds stay locked, recoverable.
+            const isDeclined = result.status === 'declined';
             return {
                 content: [
                     {
@@ -423,9 +446,12 @@ server.tool(
                         text: JSON.stringify(
                             {
                                 success: false,
-                                message: result.message || "Payment was declined by merchant.",
+                                status: result.status,
+                                message: result.message || "Payment was not confirmed.",
                                 token_status: "ACTIVE",
-                                note: "Token NOT burned. Funds will be refunded automatically via webhook within minutes.",
+                                note: isDeclined
+                                    ? "Token NOT burned. Funds will be refunded automatically via the decline webhook within minutes."
+                                    : "Token NOT burned — no confirmed charge. If you are unsure whether the order went through, do NOT retry blindly (double-charge risk); verify the merchant, or call cancel_payment_token to release the funds.",
                             },
                             null,
                             2
@@ -436,8 +462,11 @@ server.tool(
             };
         }
 
+        // Confirmed — burn the token, passing the REAL receipt id if one was scraped.
+        await burnTokenRemote(token, result.receipt_id);
+
         // Step 4: Refund underspend if actual amount was less than token amount
-        if (actual_amount !== undefined && result.success) {
+        if (actual_amount !== undefined) {
             await refundUnderspendRemote(token, actual_amount);
         }
 
@@ -448,11 +477,12 @@ server.tool(
                     type: "text" as const,
                     text: JSON.stringify(
                         {
-                            success: result.success,
+                            success: true,
+                            status: "confirmed",
                             message: result.message,
                             receipt_id: result.receipt_id || null,
                             token_status: "BURNED",
-                            note: "Token has been permanently invalidated after this transaction.",
+                            note: "Token has been permanently invalidated after this confirmed transaction.",
                         },
                         null,
                         2
@@ -593,7 +623,7 @@ server.tool(
         }
 
         // Step 2: Validate new key against Dashboard API before swapping
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         try {
             const resp = await fetch(`${ZZERO_API}/api/wdk/balance`, {
                 headers: {
@@ -636,7 +666,8 @@ server.tool(
                 text: JSON.stringify({
                     status: "SUCCESS",
                     message: `✅ ${result.message}`,
-                    active_key_prefix: trimmed.slice(0, 12) + "...",
+                    // Masked hint only — never echo a usable portion of the secret to the chat/model context.
+                    active_key_hint: maskKey(trimmed),
                     note: "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
                 }, null, 2),
             }],
@@ -659,7 +690,7 @@ server.tool(
                 type: "text" as const,
                 text: JSON.stringify({
                     configured: hasKey,
-                    key_prefix: hasKey ? key.slice(0, 12) + "..." : null,
+                    key_hint: hasKey ? maskKey(key) : null,
                     note: hasKey
                         ? "Key is active. Call set_api_key to update it."
                         : "No key configured. Call set_api_key with your Passport Key from https://www.clawcard.store/dashboard/agents",
@@ -682,8 +713,15 @@ server.tool(
             .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
     },
     async ({ checkout_url, card_alias }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const API_KEY = getPassportKey();  // ✅ FIX: use hot-swap key store, not process.env
+
+        // Spend guard for the autonomous path. auto_pay derives the amount itself
+        // (scraped fiat total OR on-chain amount from an EIP-681 link / calldata), so there is
+        // no human-authorized token to cross-check against — this range IS the only amount guard.
+        // It bounds the blast radius if price extraction or a payment link is wrong/malicious.
+        const AUTO_PAY_MIN_USD = 1;
+        const AUTO_PAY_MAX_USD = 100;
 
         if (!API_KEY) {
             return {
@@ -695,28 +733,8 @@ server.tool(
             };
         }
 
-        // ── SSRF guard ───────────────────────────────────────────────
-        (() => {
-            let url: URL;
-            try { url = new URL(checkout_url); } catch {
-                throw new Error(`Invalid checkout_url: ${checkout_url}`);
-            }
-            const isDev = process.env.NODE_ENV !== "production";
-            const hostname = url.hostname;
-            if (!(isDev && (hostname === "localhost" || hostname === "127.0.0.1"))) {
-                if (url.protocol !== "https:") {
-                    throw new Error(`checkout_url must use HTTPS.`);
-                }
-                const privatePatterns = [
-                    /^localhost$/i, /^127\./, /^10\./,
-                    /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
-                    /^169\.254\./, /^\[::1\]$/, /^0\.0\.0\.0$/,
-                ];
-                if (privatePatterns.some(p => p.test(hostname))) {
-                    throw new Error(`SSRF blocked host: ${hostname}`);
-                }
-            }
-        })();
+        // ── SSRF guard (shared helper) ───────────────────────────────
+        assertSafeCheckoutUrl(checkout_url);
 
         // ── Single Browser Instance for efficiency ──────────────────
         const browser = await chromium.launch({ headless: true });
@@ -746,9 +764,21 @@ server.tool(
                     };
                 }
 
+                // Same spend guard as the fiat route — the on-chain amount comes from an
+                // untrusted EIP-681 link / calldata, so cap it before sending USDC.
+                if (amount < AUTO_PAY_MIN_USD || amount > AUTO_PAY_MAX_USD) {
+                    return {
+                        content: [{ type: "text" as const, text: JSON.stringify({
+                            route: "WEB3", status: "AMOUNT_OUT_OF_RANGE", recipient: to, detected_amount: amount,
+                            message: `🚨 BLOCKED: Web3 amount $${amount} is outside the allowed $${AUTO_PAY_MIN_USD}–$${AUTO_PAY_MAX_USD} range. No funds were sent.`,
+                        }, null, 2) }],
+                        isError: true,
+                    };
+                }
+
                 const resp = await fetch(`${ZZERO_API}/api/wdk/transfer`, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json", "x-passport-key": API_KEY },
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}` },
                     body: JSON.stringify({ to, amount, card_alias }),
                 });
                 const txResult = await resp.json() as any;
@@ -765,9 +795,9 @@ server.tool(
                 return {
                     content: [{ type: "text" as const, text: JSON.stringify({
                         route: "WEB3", method: web3Result.method, status: "SUCCESS",
-                        recipient: to, amount_usdt: amount, tx_hash: txResult.txHash,
-                        message: `✅ Web3 payment sent on-chain! ${amount} USDT → ${to}.`,
-                        gas_savings: "~$0.001 (ERC-4337 Paymaster, gasless for user)",
+                        recipient: to, amount_usdc: amount, tx_hash: txResult.txHash,
+                        message: `✅ Web3 payment sent on-chain! ${amount} USDC → ${to}.`,
+                        gas_savings: "~$0.001 (Coinbase Paymaster on Base, gasless for user)",
                     }, null, 2) }],
                 };
             }
@@ -785,10 +815,11 @@ server.tool(
                 };
             }
 
-            if (totalPrice < 1 || totalPrice > 100) {
+            if (totalPrice < AUTO_PAY_MIN_USD || totalPrice > AUTO_PAY_MAX_USD) {
                 return {
                     content: [{ type: "text" as const, text: JSON.stringify({
                         route: "FIAT", status: "AMOUNT_OUT_OF_RANGE", detected_price: totalPrice,
+                        message: `Detected total $${totalPrice} is outside the allowed $${AUTO_PAY_MIN_USD}–$${AUTO_PAY_MAX_USD} range.`,
                     }, null, 2) }],
                     isError: true,
                 };
@@ -804,18 +835,25 @@ server.tool(
 
             // Fill Form (Reusing the same page!)
             const fillResult = await fillCheckoutForm(checkout_url, cardData, page);
+
+            // Burn ONLY on a confirmed charge. Any other outcome leaves the JIT token unburned
+            // so the locked funds are recoverable (cancel/expire/decline-webhook).
             if (fillResult.success) {
-                const burnOk = await burnTokenRemote(token.token);
+                const burnOk = await burnTokenRemote(token.token, fillResult.receipt_id);
                 if (!burnOk) console.error(`[WARN] Token burn failed for ${token.token} — manual check needed`);
+            } else {
+                // Release the freshly-issued JIT token so the price funds don't sit locked on a non-payment.
+                await cancelTokenRemote(token.token).catch(() => {});
             }
 
             return {
                 content: [{ type: "text" as const, text: JSON.stringify({
-                    route: "FIAT", status: fillResult.success ? "SUCCESS" : "FILL_FAILED",
+                    route: "FIAT",
+                    status: fillResult.success ? "SUCCESS" : (fillResult.status || "FILL_FAILED").toUpperCase(),
                     detected_price: totalPrice,
                     message: fillResult.success
-                        ? `✅ JIT card issued for $${totalPrice} and checkout filled.`
-                        : `❌ Fill failed: ${fillResult.message}`,
+                        ? `✅ Confirmed: JIT card issued for $${totalPrice} and order confirmed by merchant.`
+                        : `❌ Not confirmed (${fillResult.status}): ${fillResult.message} Token released.`,
                     receipt_id: fillResult.receipt_id || null,
                 }, null, 2) }],
                 isError: !fillResult.success,
@@ -859,7 +897,7 @@ server.tool(
             .describe("Brief description of what went wrong, e.g. 'Could not find card number field' or 'Page redirected to CAPTCHA'."),
     },
     async ({ url, error_type, error_message }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             await fetch(`${ZZERO_API}/api/checkout-hints`, {
@@ -896,93 +934,115 @@ server.resource(
     },
     async (uri) => {
         const sopContent = `
-# Z-ZERO Autonomous Payment Skill SOP (v2.0.0)
+# Z-ZERO Autonomous Payment SOP (v2.1.0 — matches MCP ≥ 1.3.0)
 
-This SOP tells the AI Agent how to use Z-ZERO tools to autonomously purchase goods on behalf of the user — without ever handling raw credit card data.
+How an AI Agent uses Z-ZERO to buy goods for the user WITHOUT ever handling raw card data.
+Mental model: you only ever hold a one-time **token** + a **URL**. Z-ZERO does the privileged
+card injection in the background. "Filling a form" is NOT "paying" — always read the result \`status\`.
 
 ---
 
-## Group 1: Wallet Config (READ FIRST)
+## STEP 0 — Route the request (decide FIRST)
+
+One question: **is the final price visible now, or only after shipping?**
+- **Digital / SaaS / API / on-chain** (price visible now) → **PATH A** (one call).
+- **Physical goods** (Shopify, Etsy, WooCommerce — price appears only AFTER shipping) → **PATH B**.
+
+Always do WALLET & SAFETY first.
+
+---
+
+## WALLET & SAFETY (do first, every time)
 
 Tools: \`check_balance\`, \`list_cards\`, \`get_deposit_addresses\`, \`set_api_key\`, \`show_api_key_status\`
 
-Before ANY purchase:
-1. Confirm exactly what the user wants to buy and the expected price (in USD).
-2. Call \`check_balance\` using your default \`card_alias\` to verify sufficient funds.
-   - If balance is insufficient → STOP. Ask the human to deposit USDT to their wallet.
-3. Use \`list_cards\` to see available card aliases, NOT to check spendable balance.
-4. Never ask for the API key proactively — only call \`set_api_key\` when the user explicitly gives you one.
+1. Confirm exactly what the user wants and the expected USD price.
+2. \`check_balance\` on the default \`card_alias\` → if insufficient, STOP and ask the user to deposit
+   USDC on Base (\`get_deposit_addresses\`).
+3. \`list_cards\` = see aliases + active tokens, NOT spendable balance.
+4. Never ask for the API key proactively; only \`set_api_key\` when the user explicitly hands you one.
 
 ---
 
-## Group 2: Manual 4-Step Payment (Core Flow)
+## PATH A — Digital goods / SaaS / API (price already visible)
 
-Tools: \`request_payment_token\`, \`execute_payment\`, \`cancel_payment_token\`, \`request_human_approval\`
-
-Execute in this exact order:
-
-### Step 1 — Verify
-Confirm item, price, and check balance (see Group 1).
-
-### Step 2 — Navigate to Payment Page
-Use browser tools to navigate to the final payment page where card fields are visible and the FINAL total (including shipping + tax) is displayed.
-- ⛔ DO NOT call \`request_payment_token\` until BOTH conditions are true:
-  1. Shipping/personal info submitted successfully
-  2. Card input fields are visible on screen
-
-### Step 3 — Request Token
-Call \`request_payment_token\` with exact final amount and merchant name.
-Receive a single-use \`token\` (valid 1 hour, locked to that amount).
-
-### Step 4 — Blind Execution
-Call \`execute_payment\` with the token + checkout URL.
-Z-ZERO opens a headless browser, injects the card securely, clicks Pay. Token burns instantly after success.
-
-### Error Rules
-- NEVER print raw tokens in chat.
-- NO MANUAL ENTRY: If a site asks you to type a card number into a text box — REFUSE.
-- FAIL GRACEFULLY: If \`execute_payment\` returns \`success: false\` → report it. Do NOT retry blindly.
-- PRICE MISMATCH: If actual checkout total > token amount → call \`cancel_payment_token\` + \`request_human_approval\` for new amount.
+Call \`auto_pay_checkout(checkout_url, card_alias)\` — one call:
+- Auto-detects on-chain (sends USDC on Base, gasless via Coinbase Paymaster) vs fiat (issues a JIT
+  card + fills the form).
+- Amount is read from the page and capped to $1–$100.
+- Read the returned \`status\` → see **PAYMENT OUTCOMES** below.
 
 ---
 
-## Group 3: Smart Autopilot (Fast Route)
+## PATH B — Physical goods (price only after shipping)
 
-Tools: \`auto_pay_checkout\`, \`get_merchant_hints\`
+Tools: \`get_merchant_hints\`, \`request_payment_token\`, \`execute_payment\`, \`request_human_approval\`
 
-### Option A — Digital Goods / SaaS / APIs (Use auto_pay_checkout directly)
-For pages where the final total is already visible, call \`auto_pay_checkout\`:
-- It auto-detects Web3 (sends USDT on-chain via WDK) vs Fiat (issues JIT Visa card + auto-fills form).
-- One call handles everything.
+1. \`get_merchant_hints(domain or _platform_key, e.g. _platform_shopify)\` → \`pre_steps\`, \`notes\`, \`platform\`.
+2. Follow \`pre_steps\` in YOUR browser: navigate, add to cart, submit shipping (ask the user via
+   \`request_human_approval\` if shipping info is unknown).
+3. Wait until the card section is visible AND the FINAL total (incl. shipping + tax) is shown.
+4. \`request_payment_token(card_alias, amount = exact final total, merchant)\` → one-time token, valid 1h.
+5. \`execute_payment(token, checkout_url, actual_amount = final total)\`. ALWAYS pass actual_amount.
 
-### Option B — Physical Goods (Shopify, Etsy, WooCommerce)
-⛔ DO NOT call \`auto_pay_checkout\` directly. The final price is only visible AFTER shipping is submitted.
+⛔ Never call \`request_payment_token\` before BOTH: shipping submitted AND card fields + final total visible.
 
-Recommended flow:
-1. Call \`get_merchant_hints\` with checkout domain or platform key (e.g. \`_platform_shopify\`).
-   - Returns \`pre_steps\` (navigation instructions) + \`notes\` + \`platform\`.
-2. Follow the \`pre_steps\` — navigate, add to cart, fill shipping form.
-   - Ask user for shipping info via \`request_human_approval\` if not already known.
-3. Wait for payment/card section to appear + FINAL total is visible.
-4. Call \`request_payment_token\` with the exact final amount (Group 2).
-5. Call \`execute_payment\` with token + checkout URL (Group 2).
+⚠️ **Resumable URL required.** \`execute_payment\` opens its OWN fresh, cookieless browser at \`checkout_url\` —
+your own browsing session does NOT carry over. So \`checkout_url\` must reload the cart + final total + card
+fields on its own (e.g. a Shopify \`/checkouts/c/<token>\` or Etsy checkout-token URL). If it instead needs
+your logged-in session/cookies, the cold browser lands on an empty cart and you'll get \`no_fields\` — in that
+case finish the purchase in your own browser, or use a merchant whose checkout URL is self-resumable.
 
-### Platform Detection Signals
-| Platform | Detection Signal |
+### Platform detection
+| Platform | Signal |
 |---|---|
-| Shopify | JS object \`window.Shopify\` exists, OR \`<script src="cdn.shopify.com">\`, OR \`<meta name="shopify-checkout-api-token">\` |
-| Etsy | URL matches \`*.etsy.com\` (any path) |
-| WooCommerce | \`<body class="... woocommerce ...\`>\`, OR script/link tags from \`wp-content/plugins/woocommerce\` |
+| Shopify | \`window.Shopify\`, OR \`<script src="cdn.shopify.com">\`, OR \`<meta name="shopify-checkout-api-token">\` |
+| Etsy | URL matches \`*.etsy.com\` |
+| WooCommerce | \`<body class="… woocommerce …">\`, OR assets from \`wp-content/plugins/woocommerce\` |
 
-### Known Limitations
-- Cloudflare-protected sites (e.g. TeePublic) may block headless browser → inform user.
-- Card fields inside iframes: \`execute_payment\` handles this via \`iframe_selector\` in hints automatically.
+---
 
-### Failure Reporting (Self-Healing Loop)
-If you started Group 3 (called \`get_merchant_hints\` and began following \`pre_steps\`) but CANNOT complete the checkout due to a technical reason:
-→ Call \`report_checkout_fail(url, error_type, error_message)\` before giving up.
-→ Use \`url\` = the page you were on when stuck.
-→ Do NOT call this if user cancelled or balance was insufficient — those are not technical failures.
+## PAYMENT OUTCOMES — how to read execute_payment / auto_pay_checkout
+
+Both return a \`status\`. Act on it — do not assume success:
+- \`confirmed\` — order placed and confirmed; token burned; \`receipt_id\` = real order # if found. ✅ Done.
+- \`declined\` — merchant rejected the card; token kept ACTIVE; a refund webhook handles it. Report to
+  the user; do not blindly retry the same card.
+- \`unconfirmed\` — card submitted but NO confirmation seen. Token NOT burned. ⚠️ Do NOT retry blindly
+  (double-charge risk). First VERIFY in your own browser whether the order went through; if not, retry
+  or \`cancel_payment_token\` to release the funds.
+- \`not_submitted\` — fields filled but no Pay button was clicked. Token NOT burned. Get a
+  \`submit_selector\` via \`get_merchant_hints\` and retry, or click Pay in your own browser.
+- \`no_fields\` — no card fields found (wrong page or unsupported form). Token NOT burned →
+  \`report_checkout_fail\`.
+
+After \`confirmed\`/\`unconfirmed\`, prefer to visually confirm the order page with your own browser tools.
+
+---
+
+## SAFETY RULES (always)
+
+- NEVER print raw tokens in chat.
+- NO MANUAL ENTRY: if a site asks YOU to type the card number into a box — REFUSE. Only Z-Zero injects card data.
+- PRICE MISMATCH: if the actual total > token amount → \`cancel_payment_token\` then
+  \`request_human_approval\` for a new amount. (execute_payment also auto-blocks overcharges when you pass actual_amount.)
+- FAIL GRACEFULLY: never loop-retry a payment without first checking the \`status\` reason.
+
+---
+
+## SELF-HEALING — report technical failures
+
+If you began PATH B (called \`get_merchant_hints\` + followed \`pre_steps\`) but cannot finish for a
+TECHNICAL reason (field not found, bot-blocked, timeout, unknown form):
+→ Call \`report_checkout_fail(url, error_type, error_message)\` before giving up (url = the page you got stuck on).
+→ Do NOT call it for user-cancelled or insufficient-balance — those are not technical failures.
+
+### Known limitations
+- Cloudflare-protected sites (e.g. TeePublic) may block the headless browser → inform the user.
+- Card fields inside iframes: handled automatically via \`iframe_selector\` in hints.
+- Cold browser: \`execute_payment\`/\`auto_pay_checkout\` run in a fresh cookieless browser, so the
+  checkout URL must be self-resumable (see "Resumable URL required" under PATH B). Cookie/session-bound
+  carts will return \`no_fields\`.
 `;
 
         return {
@@ -1003,9 +1063,9 @@ If you started Group 3 (called \`get_merchant_hints\` and began following \`pre_
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error(`🔐 OpenClaw MCP Server v${CURRENT_MCP_VERSION} running (Phase 2: Smart Routing enabled)...`);
+    console.error(`🔐 Z-Zero MCP Server v${CURRENT_MCP_VERSION} running (Base + USDC, gasless via Coinbase Paymaster)...`);
     console.error("Status: Secure & Connected to Z-ZERO Gateway");
-    console.error("Tools: list_cards, check_balance, request_payment_token, execute_payment, cancel_payment_token, request_human_approval, auto_pay_checkout, report_checkout_fail");
+    console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, set_api_key, show_api_key_status");
 }
 
 main().catch(console.error);

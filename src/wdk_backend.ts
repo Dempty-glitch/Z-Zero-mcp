@@ -3,10 +3,10 @@
 // Exports IDENTICAL function signatures so index.ts can swap backends without any changes.
 //
 // Key differences from custodial api_backend.ts:
-//   - getBalanceRemote() → reads USDT balance on-chain (not from Supabase wallets table)
-//   - getDepositAddressesRemote() → returns WDK wallet address (not HD custodial address)
-//   - issueTokenRemote() → sends USDT on-chain first, THEN issues JIT card
-//   - cancelTokenRemote() → triggers on-chain USDT refund back to user WDK wallet
+//   - getBalanceRemote() → reads stablecoin (USDC) balance on-chain on Base (not from Supabase wallets table)
+//   - getDepositAddressesRemote() → returns the Base wallet address (not HD custodial address)
+//   - issueTokenRemote() → sends USDC on Base first, THEN issues JIT card
+//   - cancelTokenRemote() → triggers on-chain USDC refund back to user's Base wallet
 
 import type { CardData, PaymentToken } from "./types.js";
 import { getPassportKey, hasPassportKey } from "./lib/key-store.js";
@@ -60,10 +60,14 @@ async function internalApiRequest(endpoint: string, method: string, body: any) {
     }
     const url = `${API_BASE_URL.replace(/\/$/, '')}${endpoint}`;
     try {
+        // Two independent factors on these PAN/burn endpoints:
+        //  - x-internal-secret: coarse platform gate (shared deploy secret)
+        //  - Authorization: Bearer <Passport Key>: per-user identity → server enforces token ownership
         const res = await fetch(url, {
             method,
             headers: {
                 "x-internal-secret": INTERNAL_SECRET,
+                "Authorization": `Bearer ${getPassportKey()}`,
                 "Content-Type": "application/json",
                 "X-MCP-Version": CURRENT_MCP_VERSION,
             },
@@ -91,33 +95,32 @@ export async function listCardsRemote(): Promise<any> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Balance: On-chain USDT via Dashboard WDK API
+// Balance: On-chain USDC (stablecoin) on Base via Dashboard API
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function getBalanceRemote(cardAlias: string): Promise<any> {
-    // Call Dashboard to get WDK wallet balance (Dashboard resolves user from passport key,
-    // finds connected WDK wallet, queries on-chain balance)
+    // Call Dashboard to get the agent's Base wallet balance (Dashboard resolves user from
+    // passport key, finds the connected Base wallet, queries on-chain USDC balance)
     const data = await apiRequest('/api/wdk/balance', 'GET');
     if (data?.error) {
         return {
             error: true,
-            message: 'WDK wallet not connected. Create one at https://www.clawcard.store/dashboard/agent-wallet'
+            message: 'Base wallet not connected. Create one at https://www.clawcard.store/dashboard/agent-wallet'
         };
     }
 
     return {
-        wallet_balance: data.balance_usdt,
-        currency: 'USDT',
-        chain: data.chain || 'ethereum',
+        wallet_balance: data.base_usdc_balance ?? data.balance_usdt,
+        currency: 'USDC',
+        chain: data.chain || 'base',
         address: data.address,
-        tron_address: data.tron_address,
-        mode: 'wdk_onchain',
-        note: `Non-custodial WDK wallet. On-chain USDT balance. Address: ${data.address}`
+        mode: 'base_onchain',
+        note: `Base smart-account wallet. On-chain stablecoin (USDC) balance. Address: ${data.address}`
     };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Deposit Addresses: WDK wallet address (not custodial HD addresses)
+// Deposit Address: the agent's Base smart-account address (single chain)
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function getDepositAddressesRemote(): Promise<any> {
@@ -126,28 +129,28 @@ export async function getDepositAddressesRemote(): Promise<any> {
     if (data?.error) {
         return {
             error: true,
-            message: 'WDK wallet not connected. Create one at https://www.clawcard.store/dashboard/agent-wallet'
+            message: 'Base wallet not connected. Create one at https://www.clawcard.store/dashboard/agent-wallet'
         };
     }
 
+    const balance = data.base_usdc_balance ?? data.balance_usdt;
+
     return {
-        cards: [{ alias: 'wdk-wallet', balance: data.balance_usdt, currency: 'USDT' }],
+        cards: [{ alias: 'base-wallet', balance, currency: 'USDC' }],
         deposit_addresses: {
-            ethereum: data.address,
-            tron: data.tron_address || null,
-            note: 'Send USDT to your WDK wallet. Gasless via ERC-4337 Paymaster (Ethereum) or GasFree (Tron).'
+            base: data.address,
+            note: 'Send USDC (or any supported stablecoin) on Base to your wallet. Gasless spending via the Coinbase Paymaster.'
         },
         wdk_wallet: {
             address: data.address,
-            tron_address: data.tron_address || null,
-            chain: data.chain || 'ethereum',
-            balance_usdt: data.balance_usdt
+            chain: data.chain || 'base',
+            balance_usdt: balance
         }
     };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Issue Token: On-chain USDT payment → JIT card
+// Issue Token: On-chain USDC (Base) payment → JIT card
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function issueTokenRemote(
@@ -155,9 +158,9 @@ export async function issueTokenRemote(
     amount: number,
     merchant: string
 ): Promise<any | null> {
-    // WDK Flow (reversed from custodial):
+    // Base AA Flow (reversed from custodial):
     // 1. Create Partner card first (reservation)
-    // 2. Send USDT on-chain from WDK wallet → system wallet
+    // 2. Send USDC on Base from the agent's wallet → system wallet (gasless via Coinbase Paymaster)
     // 3. Dashboard verifies on-chain tx, activates token
     // This is safe: if on-chain tx fails, Dashboard auto-cancels the card reservation.
 
@@ -165,8 +168,8 @@ export async function issueTokenRemote(
         card_alias: cardAlias,
         amount,
         merchant,
-        device_fingerprint: `mcp-wdk-${process.platform}-${process.arch}`,
-        network_id: process.env.NETWORK_ID || "polygon-wdk",
+        device_fingerprint: `mcp-base-${process.platform}-${process.arch}`,
+        network_id: process.env.NETWORK_ID || "base-usdc",
         session_id: `wdk-${Math.random().toString(36).substring(7)}`,
         wallet_mode: 'wdk',  // Signals Dashboard to use on-chain payment path
     });
@@ -225,20 +228,20 @@ export async function burnTokenRemote(token: string, receipt_id?: string): Promi
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Cancel Token: Refund USDT back to user's WDK wallet on-chain
+// Cancel Token: Refund USDC back to user's Base wallet on-chain
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function cancelTokenRemote(token: string): Promise<any> {
     const data = await apiRequest('/api/tokens/cancel', 'POST', {
         token,
-        wallet_mode: 'wdk',  // Triggers on-chain USDT refund
+        wallet_mode: 'wdk',  // Triggers on-chain USDC refund
     });
     if (data?.error) return data;
     return {
         success: !!data,
         refunded_amount: data?.refunded_amount || 0,
         tx_hash: data?.tx_hash || null,   // On-chain refund tx hash
-        note: 'USDT refunded on-chain to your WDK wallet.'
+        note: 'Stablecoin (USDC) refunded on-chain to your Base wallet.'
     };
 }
 
@@ -247,5 +250,6 @@ export async function cancelTokenRemote(token: string): Promise<any> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function refundUnderspendRemote(token: string, actualSpent: number): Promise<void> {
-    console.log(`[WDK MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
+    // console.error (NOT console.log) — stdout is the MCP stdio transport; logging there corrupts the protocol.
+    console.error(`[WDK MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
 }

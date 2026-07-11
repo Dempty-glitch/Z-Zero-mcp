@@ -36,10 +36,26 @@ export interface CardData {
     message?: string;
 }
 
+// Outcome of a checkout attempt. CRITICAL: `filled` ≠ `paid`.
+//   confirmed     — Pay was clicked AND a real confirmation signal was detected (only this burns the token)
+//   declined      — Pay was clicked but the page showed a decline/error (keep token ACTIVE for webhook refund)
+//   unconfirmed   — fields filled + Pay clicked, but no clear confirmation within the wait window (do NOT burn — funds stay recoverable)
+//   not_submitted — fields filled but no Pay button was found/clicked (do NOT burn)
+//   no_fields     — no card fields detected on the page
+//   error         — exception/timeout during the attempt
+export type PaymentOutcome =
+    | 'confirmed'
+    | 'declined'
+    | 'unconfirmed'
+    | 'not_submitted'
+    | 'no_fields'
+    | 'error';
+
 export interface PaymentResult {
-    success: boolean;
+    success: boolean;          // true ONLY when status === 'confirmed' — the sole gate for burning a token
+    status: PaymentOutcome;
     message: string;
-    receipt_id?: string;
+    receipt_id?: string;       // real order/confirmation number scraped from the page; NEVER fabricated
     amount?: number;
 }
 

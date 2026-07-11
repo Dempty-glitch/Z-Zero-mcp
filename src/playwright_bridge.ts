@@ -43,11 +43,12 @@ export async function fillCheckoutForm(
         if (err instanceof TimeoutError) {
             return {
                 success: false,
+                status: 'error',
                 message: `Checkout timed out after ${CHECKOUT_HARD_TIMEOUT_MS / 1000}s. The merchant page may be too slow or blocking automation.`,
             };
         }
         const errMsg = err instanceof Error ? err.message : String(err);
-        return { success: false, message: `Payment failed: ${errMsg}` };
+        return { success: false, status: 'error', message: `Payment failed: ${errMsg}` };
     } finally {
         if (browser) await browser.close().catch(() => {});
     }
@@ -96,6 +97,107 @@ async function tryFillField(
     return false;
 }
 
+// ============================================================
+// CONFIRMATION DETECTION — the core of "filled ≠ paid"
+// After Pay is clicked we must observe a REAL outcome before
+// telling the caller it succeeded. A blind waitForTimeout()
+// followed by success:true is what made receipts fake.
+// ============================================================
+const CONFIRM_WAIT_MS = 12_000;   // total budget to watch for an outcome (well within the 60s hard cap)
+const CONFIRM_POLL_MS = 750;
+
+// URL of a post-payment page (we additionally require the URL to have moved off the checkout page)
+const SUCCESS_URL_RE = /thank[_-]?you|order[-_]?(?:received|confirmation|confirmed|complete|placed)|\/orders?\/|\/receipts?\/|payment[_-]?success|checkout\/success|confirmation/i;
+// Strong success phrases — deliberately specific so a checkout "Order summary" panel does NOT trigger it
+const SUCCESS_TEXT_RE = /thank you for your (?:order|purchase|payment)|your order (?:has been|is) (?:confirmed|placed|received)|order (?:confirmed|placed successfully)|payment (?:successful|received|approved|complete)|purchase complete|order number[:\s#]/i;
+// Decline / failure signals
+const DECLINE_TEXT_RE = /(?:card|payment|transaction) (?:was )?declined|payment (?:failed|unsuccessful|was not|could not be processed)|(?:invalid|incorrect) (?:card|cvv|cvc|security code|card number|expiry)|insufficient funds|try (?:a |another )?(?:different )?card|card (?:was )?not accepted|we (?:couldn'?t|could not) process/i;
+// Real order/confirmation number to use as receipt_id (only when confirmed)
+const RECEIPT_RE = /(?:order|confirmation|receipt)\s*(?:number|no\.?|#)?[:\s#]*([A-Z0-9][A-Z0-9-]{3,})/i;
+
+type OutcomeKind = 'confirmed' | 'declined' | 'unconfirmed';
+
+/**
+ * Watches the page after Pay is clicked and classifies the real outcome.
+ * Polls URL + visible text for a confirmation or decline signal until a
+ * signal is seen or CONFIRM_WAIT_MS elapses. Default (no signal) is the
+ * SAFE 'unconfirmed' — caller must NOT burn the token on that.
+ */
+async function detectPaymentOutcome(
+    page: import("playwright").Page,
+    checkoutUrl: string
+): Promise<{ kind: OutcomeKind; receipt_id?: string }> {
+    const checkoutPath = (() => {
+        try { const u = new URL(checkoutUrl); return u.origin + u.pathname; } catch { return checkoutUrl.split('?')[0]; }
+    })();
+
+    const deadline = Date.now() + CONFIRM_WAIT_MS;
+    while (Date.now() < deadline) {
+        let currentUrl = '';
+        let bodyText = '';
+        try {
+            currentUrl = page.url();
+            bodyText = await page.evaluate(() => document.body?.innerText ?? '');
+        } catch {
+            // page is mid-navigation — wait and retry
+            await page.waitForTimeout(CONFIRM_POLL_MS);
+            continue;
+        }
+
+        // Decline is a definitive negative — check first.
+        if (DECLINE_TEXT_RE.test(bodyText)) {
+            return { kind: 'declined' };
+        }
+
+        const movedOff = (() => {
+            try { const u = new URL(currentUrl); return (u.origin + u.pathname) !== checkoutPath; } catch { return false; }
+        })();
+        const urlSignal = movedOff && SUCCESS_URL_RE.test(currentUrl);
+        const textSignal = SUCCESS_TEXT_RE.test(bodyText);
+
+        if (urlSignal || textSignal) {
+            const m = bodyText.match(RECEIPT_RE);
+            return { kind: 'confirmed', receipt_id: m?.[1] };
+        }
+
+        await page.waitForTimeout(CONFIRM_POLL_MS);
+    }
+
+    // No clear signal within the window — safe default, caller will NOT burn.
+    return { kind: 'unconfirmed' };
+}
+
+/** Map a detected outcome to the PaymentResult shape (receipt only ever real). */
+function outcomeToResult(
+    outcome: { kind: OutcomeKind; receipt_id?: string },
+    fieldNote: string
+): PaymentResult {
+    switch (outcome.kind) {
+        case 'confirmed':
+            return {
+                success: true,
+                status: 'confirmed',
+                message: `Payment confirmed by the merchant. ${fieldNote}`,
+                receipt_id: outcome.receipt_id,
+            };
+        case 'declined':
+            return {
+                success: false,
+                status: 'declined',
+                message: `Payment was declined by the merchant. ${fieldNote}`,
+            };
+        case 'unconfirmed':
+        default:
+            return {
+                success: false,
+                status: 'unconfirmed',
+                message:
+                    `Card details were submitted but no order confirmation was detected. ${fieldNote} ` +
+                    `The token was NOT burned — verify whether the order went through before retrying (avoid double-charge).`,
+            };
+    }
+}
+
 /** Internal implementation — called by fillCheckoutForm inside a timeout wrapper */
 async function _fillCheckoutFormInner(
     page: import("playwright").Page,
@@ -108,9 +210,24 @@ async function _fillCheckoutFormInner(
         // Prevents double-navigate which would reload page and lose cart/session state.
         const currentUrl = page.url();
         const baseCheckoutUrl = checkoutUrl.split("?")[0];
+        let landedUrl = currentUrl;
         if (!currentUrl || currentUrl === "about:blank" || !currentUrl.startsWith(baseCheckoutUrl)) {
+            // ⚠️ COLD BROWSER: execute_payment lands here with a fresh, COOKIELESS context — none of the
+            // agent's own browsing session carries over. This only works when checkout_url is RESUMABLE
+            // cold: the cart, final total and card fields must be reconstructable server-side from the URL
+            // alone (Shopify /checkouts/c/<token>, Etsy token URLs). For cookie/session-bound carts the
+            // page loads empty or redirects to /cart|/login and no card fields will be found.
             await page.goto(checkoutUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+            landedUrl = page.url();
         }
+        // Heuristic: did the cold load bounce off the intended checkout (cart/session not carried)?
+        const landedElsewhere = (() => {
+            try {
+                const want = new URL(checkoutUrl);
+                const got = new URL(landedUrl);
+                return got.host !== want.host || got.pathname.split("/")[1] !== want.pathname.split("/")[1];
+            } catch { return false; }
+        })();
 
         // ============================================================
         // STRATEGY 0: Pre-steps — click to open/reveal the payment form
@@ -201,18 +318,31 @@ async function _fillCheckoutFormInner(
             const hintSuccesses = hintFillResults.filter(Boolean).length;
             if (hintSuccesses > 0) {
                 filledFields += hintSuccesses;
+                const modeNote = `${filledFields} fields injected via agent hints${hints.iframe_selector ? ' (iframe mode)' : ''}.`;
+
+                // Must actually submit to have any chance of a real payment.
+                let clicked = false;
                 if (hints.submit_selector) {
                     try {
                         const btn = await page.$(hints.submit_selector);
-                        if (btn && await btn.isVisible()) { await btn.click(); await page.waitForTimeout(3000); }
+                        if (btn && await btn.isVisible()) { await btn.click(); clicked = true; }
                     } catch { /* non-fatal */ }
                 }
-                const receiptId = `rcpt_${Date.now().toString(36)}`;
-                return {
-                    success: true,
-                    message: `Payment form filled via agent hints${hints.iframe_selector ? ' (iframe mode)' : ''}. ${filledFields} fields injected.`,
-                    receipt_id: receiptId,
-                };
+
+                if (!clicked) {
+                    // Fields filled but no submit happened → NOT a payment. Do not fabricate success.
+                    return {
+                        success: false,
+                        status: 'not_submitted',
+                        message:
+                            `${modeNote} No submit/pay button was clicked (provide a submit_selector via get_merchant_hints). ` +
+                            `The order was NOT placed and the token was NOT burned.`,
+                    };
+                }
+
+                // Submitted — observe the real outcome before declaring success.
+                const outcome = await detectPaymentOutcome(page, checkoutUrl);
+                return outcomeToResult(outcome, modeNote);
             }
             // hints provided but nothing matched → fall through to Strategy 1
         }
@@ -369,8 +499,15 @@ async function _fillCheckoutFormInner(
         if (filledFields === 0) {
             return {
                 success: false,
+                status: 'no_fields',
                 message:
-                    "Could not detect any credit card fields on this page. The checkout form may use an unsupported format.",
+                    "Could not detect any credit card fields on this page. " +
+                    (landedElsewhere
+                        ? `The checkout URL redirected to ${landedUrl} — the cart/session likely did not carry over. ` +
+                          "Z-Zero opens its OWN fresh browser, so checkout_url must be resumable on its own " +
+                          "(e.g. a Shopify/Etsy checkout-token URL), not a page that needs the agent's logged-in session. "
+                        : "") +
+                    "The checkout form may use an unsupported format, or the page requires a logged-in session.",
             };
         }
 
@@ -396,22 +533,28 @@ async function _fillCheckoutFormInner(
             }
         }
 
-        // Wait for navigation or response
-        if (clicked) {
-            await page.waitForTimeout(3000);
+        const fieldNote = `${filledFields} fields injected.`;
+
+        if (!clicked) {
+            // Form filled but no Pay button found → the order was never submitted.
+            return {
+                success: false,
+                status: 'not_submitted',
+                message:
+                    `${fieldNote} No Pay/Submit button could be found or clicked, so the order was NOT placed ` +
+                    `and the token was NOT burned. Use get_merchant_hints to supply a submit_selector.`,
+            };
         }
 
-        const receiptId = `rcpt_${Date.now().toString(36)}`;
-
-        return {
-            success: true,
-            message: `Payment form filled and submitted successfully. ${filledFields} fields injected.`,
-            receipt_id: receiptId,
-        };
+        // Submitted — observe the real outcome (confirmed / declined / unconfirmed)
+        // instead of blindly assuming success. receipt_id is set ONLY if a real one is scraped.
+        const outcome = await detectPaymentOutcome(page, checkoutUrl);
+        return outcomeToResult(outcome, fieldNote);
     } catch (error: unknown) {
         const errMsg = error instanceof Error ? error.message : String(error);
         return {
             success: false,
+            status: 'error',
             message: `Payment failed: ${errMsg}`,
         };
     } finally {

@@ -4,7 +4,7 @@ A Zero-Trust Payment Protocol built for AI Agents using the [Model Context Proto
 
 **What makes it different:**
 - 🔐 **Zero-trust** — AI never sees PAN, CVV, or expiry. Card data exists only in RAM, injected via Playwright, then wiped.
-- 🌐 **Web3 + Fiat** — Auto-detects crypto checkout (EIP-681) and routes to on-chain USDT transfer. Falls back to JIT Visa for fiat.
+- 🌐 **Web3 + Fiat** — Auto-detects crypto checkout (EIP-681) and routes to a gasless USDC transfer on Base (Coinbase Paymaster). Falls back to JIT Visa for fiat.
 - 🧠 **Smart Routing** — Cloud Knowledge Base (`get_merchant_hints`) provides platform-specific checkout playbooks for Shopify, Etsy, WooCommerce, and more.
 - 🔄 **Self-Healing** — Failed checkouts are logged via `report_checkout_fail` for admin review, improving future success rates.
 
@@ -12,36 +12,39 @@ A Zero-Trust Payment Protocol built for AI Agents using the [Model Context Proto
 
 ## How It Works
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant AI as AI Agent
-    participant MCP as MCP Tools
-    participant API as Z-ZERO API
-    participant DB as Supabase DB
-
-    User->>AI: "Buy me this Shopify item"
-    Note over AI: Scans available MCP Tools
-    AI->>MCP: Reads description of auto_pay_checkout
-    MCP-->>AI: "⚠️ MANDATORY: Read mcp://resources/sop first"
-    Note over AI: Fetches SOP before proceeding
-    AI->>MCP: Fetch resource mcp://resources/sop
-    MCP-->>AI: Platform rules + 3-Group payment SOP
-    Note over AI: "Shopify = physical goods. Must collect shipping first."
-    AI->>MCP: get_merchant_hints("_platform_shopify")
-    MCP->>API: GET /api/checkout-hints?domain=_platform_shopify&fields=merchant
-    API->>DB: Query checkout_hints table
-    DB-->>API: Platform hints data
-    API-->>MCP: Returns pre_steps + notes only
-    MCP-->>AI: "Fill shipping form first, click Next..."
-    Note over AI: Navigates checkout, fills shipping, waits for payment page
-    AI->>MCP: request_payment_token(amount, card_alias)
-    MCP-->>AI: Token: temp_auth_XYZ (1hr TTL)
-    AI->>MCP: execute_payment(token, checkout_url)
-    Note over MCP: Playwright auto-fills card form, burns token after use
-    MCP-->>AI: Success — payment complete
-    AI-->>User: "Done! Your Shopify item has been ordered."
 ```
+ User            AI Agent              MCP Tools              Z-ZERO API
+  │                  │                      │                      │
+  │ "Buy me this     │                      │                      │
+  │  Shopify item"   │                      │                      │
+  ├─────────────────▶│                      │                      │
+  │                  │ read mcp://resources/sop (MANDATORY)        │
+  │                  ├─────────────────────▶│                      │
+  │                  │◀── platform rules ───┤                      │
+  │                  │    + payment SOP     │                      │
+  │                  │                      │                      │
+  │                  │ get_merchant_hints("_platform_shopify")     │
+  │                  ├─────────────────────▶│  GET /checkout-hints │
+  │                  │                      ├─────────────────────▶│
+  │                  │◀── pre_steps+notes ──┤◀──── hints data ─────┤
+  │                  │                      │                      │
+  │                  │ (fills shipping form, reaches payment page) │
+  │                  │                      │                      │
+  │                  │ request_payment_token(amount, card_alias)   │
+  │                  ├─────────────────────▶│                      │
+  │                  │◀── temp_auth token ──┤   (1-hour TTL)       │
+  │                  │                      │                      │
+  │                  │ execute_payment(token, checkout_url)        │
+  │                  ├─────────────────────▶│                      │
+  │                  │      Playwright auto-fills card form,       │
+  │                  │      burns token after single use 🔥        │
+  │                  │◀──── ✅ success ─────┤                      │
+  │ "Done! Your item │                      │                      │
+  │  is ordered."    │                      │                      │
+  │◀─────────────────┤                      │                      │
+```
+
+*The AI agent never touches card data — it only handles single-use tokens. Real card details are injected by Playwright at the last step and wiped from RAM.*
 
 ---
 
@@ -86,7 +89,7 @@ Get your Passport Key at: **[clawcard.store/dashboard/agents](https://www.clawca
 |------|-------------|
 | `list_cards` | List all virtual card aliases and balances |
 | `check_balance` | Check spendable USD balance for a card alias |
-| `get_deposit_addresses` | Get crypto deposit addresses (EVM + Tron) to top up balance |
+| `get_deposit_addresses` | Get your Base deposit address to top up with USDC (stablecoin on Base) |
 | `set_api_key` | Activate a new Passport Key instantly, no restart needed |
 | `show_api_key_status` | Check if a Passport Key is currently loaded (prefix only) |
 

@@ -32,7 +32,7 @@ console.error(`[Z-ZERO MCP] 🚀 Pure WDK Non-Custodial Mode`);
 import { fillCheckoutForm } from "./playwright_bridge.js";
 import type { CheckoutHints } from "./types.js";
 import { detectWeb3Payment } from "./lib/web3-detector.js";
-import { extractTotalPrice } from "./lib/extract-total-price.js";
+import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-price.js";
 import { chromium } from "playwright";
 import { setPassportKey, getPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap support
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
@@ -825,8 +825,19 @@ server.tool(
                 };
             }
 
-            // Issue Token
-            const token = await issueTokenRemote(card_alias, totalPrice, checkout_url);
+            // FX buffer: over-provision the JIT card limit so a non-USD checkout
+            // (FX-converted + fee on our USD card) doesn't drift over the limit and
+            // get declined. USD totals are final → tiny rounding buffer only. Any
+            // unspent buffer is auto-refunded on-chain when the charge settles.
+            const currency = await detectCheckoutCurrency(page);
+            const bufferPct = currency === 'NON_USD' ? 0.05 : 0.02;
+            let issueAmount = Math.round(totalPrice * (1 + bufferPct) * 100) / 100;
+            // Never exceed the per-tx cap; merchant charges <= totalPrice <= cap anyway.
+            if (issueAmount > AUTO_PAY_MAX_USD) issueAmount = AUTO_PAY_MAX_USD;
+            console.error(`[SMART ROUTE] FX buffer: ${currency}, limit $${totalPrice} → $${issueAmount} (+${Math.round(bufferPct * 100)}%)`);
+
+            // Issue Token (card limit = buffered amount)
+            const token = await issueTokenRemote(card_alias, issueAmount, checkout_url);
             if (!token || token.error) throw new Error(token?.message || "Token issue failed");
 
             // Resolve Card Data
@@ -851,8 +862,12 @@ server.tool(
                     route: "FIAT",
                     status: fillResult.success ? "SUCCESS" : (fillResult.status || "FILL_FAILED").toUpperCase(),
                     detected_price: totalPrice,
+                    authorized_amount: issueAmount,
+                    fx_buffer: issueAmount > totalPrice
+                        ? `Locked $${issueAmount} = $${totalPrice} + ${Math.round(bufferPct * 100)}% ${currency === 'NON_USD' ? 'FX' : 'rounding'} buffer; unspent buffer auto-refunds after the charge settles.`
+                        : undefined,
                     message: fillResult.success
-                        ? `✅ Confirmed: JIT card issued for $${totalPrice} and order confirmed by merchant.`
+                        ? `✅ Confirmed: JIT card issued (limit $${issueAmount}) and order confirmed by merchant for ~$${totalPrice}.`
                         : `❌ Not confirmed (${fillResult.status}): ${fillResult.message} Token released.`,
                     receipt_id: fillResult.receipt_id || null,
                 }, null, 2) }],

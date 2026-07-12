@@ -117,6 +117,38 @@ export async function extractTotalPrice(page: Page): Promise<number | null> {
     return null;
 }
 
+/**
+ * Detect whether the checkout charges in USD or a non-USD currency.
+ * Purpose: size the FX buffer on the JIT card. A USD checkout total is final —
+ * our USD card pays it 1:1, no conversion. A non-USD total gets FX-converted +
+ * a conversion fee on our USD card and can drift OVER the authorized limit →
+ * issuer decline. So non-USD orders need a slightly larger card limit.
+ *
+ * Conservative by design: defaults to 'USD' unless a CLEAR non-USD signal is
+ * present. Both error directions are non-catastrophic (over-buffer → refunded
+ * at settlement; under-buffer → a decline the agent can retry), so we avoid
+ * false positives from random uppercase text via a currency-code whitelist.
+ */
+export async function detectCheckoutCurrency(page: Page): Promise<'USD' | 'NON_USD'> {
+    try {
+        return await page.evaluate(() => {
+            const body = (document.body as HTMLElement).innerText || '';
+            // 1. Non-USD currency symbols
+            if (/[€£¥₹₩₺₽฿₴]/.test(body)) return 'NON_USD';
+            // 2. Ambiguous "$" with a non-US region prefix (CA$, A$, NZ$, HK$, R$, S$)
+            if (/\b(?:CA|A|NZ|HK|R|S)\$/.test(body)) return 'NON_USD';
+            // 3. Explicit 3-letter ISO codes — whitelist of common non-USD only
+            const NON_USD = ['EUR','GBP','JPY','CNY','INR','AUD','CAD','CHF','SGD','HKD','NZD','SEK','NOK','DKK','KRW','MXN','BRL','ZAR','AED','THB','MYR','PHP','VND','IDR','PLN','TRY'];
+            for (const code of NON_USD) {
+                if (new RegExp(`\\b${code}\\b`).test(body)) return 'NON_USD';
+            }
+            return 'USD';
+        });
+    } catch {
+        return 'USD'; // fail safe → smallest buffer, never blocks a payment
+    }
+}
+
 // ─── Utility ─────────────────────────────────────────────────────────────────
 function parseMoneyString(text: string): number | null {
     // Handles: "$49.99", "USD 49.99", "49,99 $", "49.99 USD"

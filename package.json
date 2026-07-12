@@ -26,6 +26,14 @@
     ],
     "author": "Z-ZERO",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Dempty-glitch/Z-Zero-mcp.git"
+    },
+    "homepage": "https://www.clawcard.store/docs/agent",
+    "bugs": {
+        "url": "https://github.com/Dempty-glitch/Z-Zero-mcp/issues"
+    },
     "files": [
         "dist/",
         "README.md"

@@ -1,4 +1,4 @@
-# OpenClaw: Z-ZERO AI Agent MCP Server
+# Z-Zero — Payment MCP Server for AI Agents
 
 A Zero-Trust Payment Protocol built for AI Agents using the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Give your agents (Claude, Cursor, Antigravity) the ability to make real-world purchases — securely, without ever seeing a real card number.
 
@@ -59,6 +59,20 @@ Crypto-native checkouts settle as **gasless USDC transfers on Base**, sponsored 
 
 ---
 
+## Why Z-Zero
+
+Z-Zero is not a checkout bot — it's payment infrastructure for the agentic-commerce era.
+
+**Today**, the web is built for humans: agents must fill forms and click buttons, and every purchase still needs a human's card. Z-Zero solves that now — JIT single-use cards + gasless USDC on Base, with card data isolated from the model. **Tomorrow**, agent payments become a standardized protocol — and what we build along the way is the long-term value:
+
+- **Shared checkout intelligence** — every transaction (and every failure) makes the network smarter. The system doesn't just retry; it evolves.
+- **An open standard for agent payments** — any agent platform plugs in via MCP; any rail (cards, USDC, x402) can be added.
+- **KYA — Know Your Agent** — verifiable agent reputation. The question isn't "can this agent pay?" but "should you trust it to?"
+
+📖 Full vision & architecture: [The Z-Zero Whitebook](https://www.clawcard.store/whitebook)
+
+---
+
 ## Quick Install (Recommended)
 
 ```bash
@@ -70,7 +84,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 ```json
 {
   "mcpServers": {
-    "openclaw": {
+    "z-zero": {
       "command": "npx",
       "args": ["-y", "z-zero-mcp-server@latest"],
       "env": {
@@ -172,4 +186,4 @@ Cancel an unused token (refunds balance).
 
 ---
 
-*Security: OpenClaw never stores your Passport Key. It is passed via environment variables and card data exists only in volatile RAM during execution.*
+*Security: Z-Zero never stores your Passport Key. It is passed via environment variables and card data exists only in volatile RAM during execution.*

@@ -46,6 +46,17 @@ A Zero-Trust Payment Protocol built for AI Agents using the [Model Context Proto
 
 *The AI agent never touches card data — it only handles single-use tokens. Real card details are injected by Playwright at the last step and wiped from RAM.*
 
+> **Crypto checkout branch:** when `auto_pay_checkout` detects a crypto-native checkout (EIP-681), it skips the card flow entirely and settles as a **gasless USDC transfer on Base** — see below.
+
+---
+
+## Live on Base Mainnet
+
+Crypto-native checkouts settle as **gasless USDC transfers on Base**, sponsored by Coinbase Paymaster. The agent (and the user behind it) hold **only USDC — no ETH, no gas UX**. Onboarding is just "deposit USDC."
+
+- ✅ Proof — real gasless USDC transfer on Base mainnet: [`0xdfd1f2f8…5d7a`](https://basescan.org/tx/0xdfd1f2f824e1232c3e03c52485332570ff01fbb0340c5571f699ed1218735d7a)
+- Fiat merchants (the 99% of the web that doesn't accept crypto) are covered by the JIT single-use Visa flow above — one MCP server, both worlds.
+
 ---
 
 ## Quick Install (Recommended)

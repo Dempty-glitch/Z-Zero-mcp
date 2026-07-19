@@ -1073,6 +1073,56 @@ TECHNICAL reason (field not found, bot-blocked, timeout, unknown form):
 );
 
 // ============================================================
+// PROMPTS: ready-made entry points users can invoke from their MCP client
+// ============================================================
+server.prompt(
+    "safe_checkout",
+    "Guided zero-trust checkout: follows the Z-ZERO SOP, surfaces the final total and asks for human approval before any money moves.",
+    {
+        checkout_url: z.string().describe("URL of the product or checkout page to buy from"),
+        budget_usd: z.string().optional().describe("Optional spending cap in USD, e.g. '25'"),
+    },
+    ({ checkout_url, budget_usd }) => ({
+        messages: [
+            {
+                role: "user" as const,
+                content: {
+                    type: "text" as const,
+                    text: [
+                        `Buy this item for me: ${checkout_url}`,
+                        budget_usd ? `My budget cap is $${budget_usd} — abort if the final total exceeds it.` : "",
+                        "",
+                        "Follow the Z-ZERO SOP strictly:",
+                        "1. Read mcp://resources/sop before anything else.",
+                        "2. Call get_merchant_hints for this platform and follow its pre_steps.",
+                        "3. Proceed through shipping until the FINAL total (including shipping) is visible.",
+                        "4. Call request_human_approval with the final total and wait for my confirmation BEFORE paying.",
+                        "5. Only then complete the payment, and report the result status honestly.",
+                    ].filter(Boolean).join("\n"),
+                },
+            },
+        ],
+    })
+);
+
+server.prompt(
+    "wallet_status",
+    "Summarize the Z-ZERO wallet: card aliases, spendable balances, and the Base USDC deposit address for top-ups.",
+    {},
+    () => ({
+        messages: [
+            {
+                role: "user" as const,
+                content: {
+                    type: "text" as const,
+                    text: "Give me a status report of my Z-ZERO wallet: call list_cards, then check_balance for each alias, then get_deposit_addresses. Summarize how much I can spend and where to send USDC (on Base) to top up. Do not trigger any payment.",
+                },
+            },
+        ],
+    })
+);
+
+// ============================================================
 // START SERVER
 // ============================================================
 async function main() {

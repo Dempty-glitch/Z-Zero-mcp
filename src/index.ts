@@ -34,7 +34,7 @@ import type { CheckoutHints } from "./types.js";
 import { detectWeb3Payment } from "./lib/web3-detector.js";
 import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-price.js";
 import { chromium } from "playwright";
-import { setPassportKey, getPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap support
+import { setPassportKey, getPassportKey, persistPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap + rotate-on-connect
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
 
 /** Masked, non-reconstructable hint for a secret key (for debug output only). */
@@ -664,15 +664,55 @@ server.tool(
                 isError: true,
             };
         }
+
+        // Step 4: ROTATE-ON-CONNECT (v1.5.0). The key the user just pasted has
+        // been through the LLM conversation → treat it as burned. Swap it for a
+        // fresh key that NEVER enters the chat: server → this process → disk.
+        // Side effect by design: connecting a second machine with a copied key
+        // rotates it and disconnects the first one ("one key = one agent").
+        let rotated = false;
+        try {
+            const rotateResp = await fetch(`${ZZERO_API}/api/keys/rotate`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${trimmed}`,
+                    "x-mcp-version": CURRENT_MCP_VERSION,
+                },
+                signal: AbortSignal.timeout(8000),
+            });
+            if (rotateResp.ok) {
+                const rotateData: any = await rotateResp.json();
+                const newKey = typeof rotateData?.new_key === "string" ? rotateData.new_key : "";
+                if (newKey.startsWith("zk_live_") || newKey.startsWith("zk_test_")) {
+                    // Persist FIRST, then activate — if the disk write fails we
+                    // keep using the (already-rotated) key in RAM and warn.
+                    const persisted = persistPassportKey(newKey);
+                    setPassportKey(newKey);
+                    rotated = true;
+                    if (!persisted) {
+                        console.error("[SET-KEY] ⚠️ Rotated key active in RAM but NOT persisted — re-connect with a fresh key from the dashboard after restart.");
+                    }
+                }
+            }
+            // Non-OK (404 = server not yet deployed, 429, 5xx) → keep pasted key, no rotation. Backward compatible.
+        } catch {
+            // Network error → keep pasted key. Backward compatible.
+        }
+
         return {
             content: [{
                 type: "text" as const,
                 text: JSON.stringify({
                     status: "SUCCESS",
-                    message: `✅ ${result.message}`,
+                    message: rotated
+                        ? "✅ Connected. For security, the key you pasted was immediately replaced with a fresh one stored locally (~/.z-zero/credentials) — the pasted key is now dead everywhere, including this conversation."
+                        : `✅ ${result.message}`,
                     // Masked hint only — never echo a usable portion of the secret to the chat/model context.
-                    active_key_hint: maskKey(trimmed),
-                    note: "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
+                    active_key_hint: maskKey(getPassportKey()),
+                    rotated_on_connect: rotated,
+                    note: rotated
+                        ? "One key = one agent: connecting another agent/machine with this account's key will disconnect this one."
+                        : "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
                 }, null, 2),
             }],
         };

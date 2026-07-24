@@ -308,7 +308,11 @@ server.tool(
         try {
             const resp = await fetch(`${ZZERO_API}/api/checkout-hints?domain=${encodeURIComponent(domain)}&fields=merchant`, {
                 headers: {
-                    "x-internal-secret": INTERNAL_SECRET,
+                    // Primary auth: Passport Key (same key as list_cards — hints are
+                    // identity+rate-limit gated, not secret). Internal secret kept
+                    // as fallback for self-hosted deployments that still use it.
+                    "Authorization": `Bearer ${getPassportKey()}`,
+                    ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
                     "x-mcp-version": CURRENT_MCP_VERSION,
                 },
             });
@@ -919,7 +923,8 @@ server.tool(
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "x-internal-secret": INTERNAL_SECRET,
+                    "Authorization": `Bearer ${getPassportKey()}`,
+                    ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
                     "x-mcp-version": CURRENT_MCP_VERSION,
                 },
                 body: JSON.stringify({ url, error_type, error_message, mcp_version: CURRENT_MCP_VERSION }),

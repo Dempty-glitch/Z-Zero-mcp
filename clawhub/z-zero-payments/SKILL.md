@@ -30,11 +30,12 @@ This skill is deliberately boring about money. Three properties are structural, 
 1. **The model never sees card data.** No PAN, no CVV, no expiry ever enters your context. You only ever handle single-use *tokens*; the real card details are injected into the merchant's checkout form by a local Playwright process and wiped from RAM. If you ever think you need a card number, you are off the rails — stop.
 2. **Humans approve money movement.** Before any payment executes, call `request_human_approval` with the exact final total and wait for confirmation. A purchase your operator didn't approve is a failed purchase, even if the checkout would have succeeded.
 3. **Blast radius is capped by design.** Tokens are amount-locked and merchant-locked. A prompt-injected or hallucinating agent holding a Z-Zero token can lose at most that token's amount — not a wallet, not a card limit.
+4. **Keys rotate on connect (v1.5.0+).** Any Passport Key that was pasted into a conversation is treated as burned: on first connect the server swaps it for a fresh key stored only in `~/.z-zero/credentials` (0600) — the live key never exists in any LLM context. One key = one machine; all agents on the machine share it, and a connect from a different machine disconnects this one (built-in intrusion alarm).
 
 ## One-time setup
 
 1. Your operator gets a Passport Key (starts with `zk_live_`) at **[clawcard.store/dashboard/agents](https://www.clawcard.store/dashboard/agents)** and funds the wallet by sending USDC on Base to the deposit address shown there.
-2. Export it as `Z_ZERO_API_KEY` in the agent environment.
+2. Export it as `Z_ZERO_API_KEY` in the agent environment. (This is only a bootstrap: on first connect the key auto-rotates and the live key moves to `~/.z-zero/credentials` — the exported value goes stale by design.)
 3. Register the MCP server (OpenClaw runs MCP via mcporter). Add to `~/.openclaw/openclaw.json`:
 
 ```json

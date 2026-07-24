@@ -108,6 +108,21 @@ Get your Passport Key at: **[clawcard.store/dashboard/agents](https://www.clawca
 
 ---
 
+## Security: rotate-on-connect (v1.5.0+)
+
+The key you copy from the dashboard (or paste into a chat) is only a **one-time bootstrap ticket**.
+The moment your agent connects with it, the MCP server silently swaps it for a fresh key:
+
+- The fresh key travels **server → MCP process → disk** and is stored in `~/.z-zero/credentials` (mode `0600`). It never appears in any LLM conversation, tool result, or config file.
+- The pasted key is **dead within seconds** — a copy living in a chat transcript, clipboard, or screenshot can no longer be used by anyone.
+- On startup the MCP loads the key from `~/.z-zero/credentials` first; the `Z_ZERO_API_KEY` env var is only a bootstrap fallback.
+
+**One key = one machine.** All agents on the same machine (Claude Desktop, Claude Code, Cursor, …) share the same MCP install and the same credentials file — install once, every agent can pay. Connecting a *different* machine with a copied key rotates it, which instantly disconnects the original machine. That is deliberate: it blocks key sharing **and** doubles as an intrusion alarm — if your agent suddenly fails auth, someone else used your key; go to the dashboard and revoke.
+
+Older self-hosted backends without the rotate endpoint keep working — the pasted key simply stays active as before.
+
+---
+
 ## Requirements
 
 - **Node.js v18+** — [nodejs.org](https://nodejs.org)

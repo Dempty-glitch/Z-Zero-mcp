@@ -34,7 +34,7 @@ import type { CheckoutHints } from "./types.js";
 import { detectWeb3Payment } from "./lib/web3-detector.js";
 import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-price.js";
 import { chromium } from "playwright";
-import { setPassportKey, getPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap support
+import { setPassportKey, getPassportKey, persistPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap + rotate-on-connect
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
 
 /** Masked, non-reconstructable hint for a secret key (for debug output only). */
@@ -308,7 +308,11 @@ server.tool(
         try {
             const resp = await fetch(`${ZZERO_API}/api/checkout-hints?domain=${encodeURIComponent(domain)}&fields=merchant`, {
                 headers: {
-                    "x-internal-secret": INTERNAL_SECRET,
+                    // Primary auth: Passport Key (same key as list_cards — hints are
+                    // identity+rate-limit gated, not secret). Internal secret kept
+                    // as fallback for self-hosted deployments that still use it.
+                    "Authorization": `Bearer ${getPassportKey()}`,
+                    ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
                     "x-mcp-version": CURRENT_MCP_VERSION,
                 },
             });
@@ -660,15 +664,55 @@ server.tool(
                 isError: true,
             };
         }
+
+        // Step 4: ROTATE-ON-CONNECT (v1.5.0). The key the user just pasted has
+        // been through the LLM conversation → treat it as burned. Swap it for a
+        // fresh key that NEVER enters the chat: server → this process → disk.
+        // Side effect by design: connecting a second machine with a copied key
+        // rotates it and disconnects the first one ("one key = one agent").
+        let rotated = false;
+        try {
+            const rotateResp = await fetch(`${ZZERO_API}/api/keys/rotate`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${trimmed}`,
+                    "x-mcp-version": CURRENT_MCP_VERSION,
+                },
+                signal: AbortSignal.timeout(8000),
+            });
+            if (rotateResp.ok) {
+                const rotateData: any = await rotateResp.json();
+                const newKey = typeof rotateData?.new_key === "string" ? rotateData.new_key : "";
+                if (newKey.startsWith("zk_live_") || newKey.startsWith("zk_test_")) {
+                    // Persist FIRST, then activate — if the disk write fails we
+                    // keep using the (already-rotated) key in RAM and warn.
+                    const persisted = persistPassportKey(newKey);
+                    setPassportKey(newKey);
+                    rotated = true;
+                    if (!persisted) {
+                        console.error("[SET-KEY] ⚠️ Rotated key active in RAM but NOT persisted — re-connect with a fresh key from the dashboard after restart.");
+                    }
+                }
+            }
+            // Non-OK (404 = server not yet deployed, 429, 5xx) → keep pasted key, no rotation. Backward compatible.
+        } catch {
+            // Network error → keep pasted key. Backward compatible.
+        }
+
         return {
             content: [{
                 type: "text" as const,
                 text: JSON.stringify({
                     status: "SUCCESS",
-                    message: `✅ ${result.message}`,
+                    message: rotated
+                        ? "✅ Connected. For security, the key you pasted was immediately replaced with a fresh one stored locally (~/.z-zero/credentials) — the pasted key is now dead everywhere, including this conversation."
+                        : `✅ ${result.message}`,
                     // Masked hint only — never echo a usable portion of the secret to the chat/model context.
-                    active_key_hint: maskKey(trimmed),
-                    note: "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
+                    active_key_hint: maskKey(getPassportKey()),
+                    rotated_on_connect: rotated,
+                    note: rotated
+                        ? "One key = one agent: connecting another agent/machine with this account's key will disconnect this one."
+                        : "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
                 }, null, 2),
             }],
         };
@@ -919,7 +963,8 @@ server.tool(
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "x-internal-secret": INTERNAL_SECRET,
+                    "Authorization": `Bearer ${getPassportKey()}`,
+                    ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
                     "x-mcp-version": CURRENT_MCP_VERSION,
                 },
                 body: JSON.stringify({ url, error_type, error_message, mcp_version: CURRENT_MCP_VERSION }),
@@ -1070,6 +1115,56 @@ TECHNICAL reason (field not found, bot-blocked, timeout, unknown form):
             ]
         };
     }
+);
+
+// ============================================================
+// PROMPTS: ready-made entry points users can invoke from their MCP client
+// ============================================================
+server.prompt(
+    "safe_checkout",
+    "Guided zero-trust checkout: follows the Z-ZERO SOP, surfaces the final total and asks for human approval before any money moves.",
+    {
+        checkout_url: z.string().describe("URL of the product or checkout page to buy from"),
+        budget_usd: z.string().optional().describe("Optional spending cap in USD, e.g. '25'"),
+    },
+    ({ checkout_url, budget_usd }) => ({
+        messages: [
+            {
+                role: "user" as const,
+                content: {
+                    type: "text" as const,
+                    text: [
+                        `Buy this item for me: ${checkout_url}`,
+                        budget_usd ? `My budget cap is $${budget_usd} — abort if the final total exceeds it.` : "",
+                        "",
+                        "Follow the Z-ZERO SOP strictly:",
+                        "1. Read mcp://resources/sop before anything else.",
+                        "2. Call get_merchant_hints for this platform and follow its pre_steps.",
+                        "3. Proceed through shipping until the FINAL total (including shipping) is visible.",
+                        "4. Call request_human_approval with the final total and wait for my confirmation BEFORE paying.",
+                        "5. Only then complete the payment, and report the result status honestly.",
+                    ].filter(Boolean).join("\n"),
+                },
+            },
+        ],
+    })
+);
+
+server.prompt(
+    "wallet_status",
+    "Summarize the Z-ZERO wallet: card aliases, spendable balances, and the Base USDC deposit address for top-ups.",
+    {},
+    () => ({
+        messages: [
+            {
+                role: "user" as const,
+                content: {
+                    type: "text" as const,
+                    text: "Give me a status report of my Z-ZERO wallet: call list_cards, then check_balance for each alias, then get_deposit_addresses. Summarize how much I can spend and where to send USDC (on Base) to top up. Do not trigger any payment.",
+                },
+            },
+        ],
+    })
 );
 
 // ============================================================

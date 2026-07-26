@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.Dempty-glitch/z-zero-mcp",
+  "description": "Payments for AI agents: gasless USDC on Base + JIT single-use virtual cards, PAN never in context.",
+  "repository": {
+    "url": "https://github.com/Dempty-glitch/Z-Zero-mcp",
+    "source": "github"
+  },
+  "version": "1.5.0",
+  "websiteUrl": "https://www.clawcard.store",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "z-zero-mcp-server",
+      "version": "1.5.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "Z_ZERO_API_KEY",
+          "description": "Passport Key (zk_live_...) from clawcard.store/dashboard/agents",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

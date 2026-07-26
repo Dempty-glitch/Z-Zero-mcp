@@ -54,19 +54,17 @@ async function apiRequest(endpoint: string, method: string = 'GET', body: any = 
 }
 
 async function internalApiRequest(endpoint: string, method: string, body: any) {
-    // ✅ FIX 9: Validate INTERNAL_SECRET presence and minimum length
-    if (!INTERNAL_SECRET || INTERNAL_SECRET.length < 16) {
-        return { error: "CONFIG_ERROR", message: "INTERNAL_SECRET is missing or too short (min 16 chars)" };
-    }
+    // Auth is the Bearer Passport Key — the server dropped the x-internal-secret
+    // gate on /resolve and /burn (redundant to per-user token ownership, Jul 2026).
+    // The old client-side CONFIG_ERROR check here broke execute_payment for every
+    // install configured per the current docs (key only). Secret is now attached
+    // only if present, as back-compat for self-hosted deployments that still gate on it.
     const url = `${API_BASE_URL.replace(/\/$/, '')}${endpoint}`;
     try {
-        // Two independent factors on these PAN/burn endpoints:
-        //  - x-internal-secret: coarse platform gate (shared deploy secret)
-        //  - Authorization: Bearer <Passport Key>: per-user identity → server enforces token ownership
         const res = await fetch(url, {
             method,
             headers: {
-                "x-internal-secret": INTERNAL_SECRET,
+                ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
                 "Authorization": `Bearer ${getPassportKey()}`,
                 "Content-Type": "application/json",
                 "X-MCP-Version": CURRENT_MCP_VERSION,

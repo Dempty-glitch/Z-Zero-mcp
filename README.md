@@ -195,4 +195,4 @@ Cancel an unused token (refunds balance).
 
 ---
 
-*Security: Z-Zero never stores your Passport Key. It is passed via environment variables and card data exists only in volatile RAM during execution.*
+*Security: the key you paste is never kept — it rotates the moment your agent first connects, and the fresh key lives only in a local owner-only file (`~/.z-zero/credentials`, mode 0600), never in any LLM conversation. Card data exists only in volatile RAM during execution.*

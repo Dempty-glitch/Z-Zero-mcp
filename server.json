@@ -6,14 +6,14 @@
     "url": "https://github.com/Dempty-glitch/Z-Zero-mcp",
     "source": "github"
   },
-  "version": "1.5.0",
+  "version": "1.5.1",
   "websiteUrl": "https://www.clawcard.store",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "z-zero-mcp-server",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {

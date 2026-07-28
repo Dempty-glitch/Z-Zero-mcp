@@ -1,7 +1,7 @@
 ---
 name: z-zero-payments
 description: Pay for things safely from your agent — gasless USDC on Base plus JIT single-use virtual cards via the Z-Zero MCP server. Card data never enters the model context, and no payment executes without explicit human approval.
-homepage: https://www.clawcard.store
+homepage: https://z-zero.xyz
 user-invocable: true
 metadata:
   {
@@ -34,7 +34,7 @@ This skill is deliberately boring about money. Three properties are structural, 
 
 ## One-time setup
 
-1. Your operator gets a Passport Key (starts with `zk_live_`) at **[clawcard.store/dashboard/agents](https://www.clawcard.store/dashboard/agents)** and funds the wallet by sending USDC on Base to the deposit address shown there.
+1. Your operator gets a Passport Key (starts with `zk_live_`) at **[z-zero.xyz/dashboard/agents](https://z-zero.xyz/dashboard/agents)** and funds the wallet by sending USDC on Base to the deposit address shown there.
 2. Export it as `Z_ZERO_API_KEY` in the agent environment. (This is only a bootstrap: on first connect the key auto-rotates and the live key moves to `~/.z-zero/credentials` — the exported value goes stale by design.)
 3. Register the MCP server (OpenClaw runs MCP via mcporter). Add to `~/.openclaw/openclaw.json`:
 

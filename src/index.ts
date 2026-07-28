@@ -66,7 +66,7 @@ server.tool(
                 content: [{
                     type: "text" as const,
                     text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://www.clawcard.store/dashboard/agents\n" +
+                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents\n" +
                         "👉 Then SET it as the 'Z_ZERO_API_KEY' environment variable in your AI tool (Claude Desktop/Cursor) and RESTART the tool."
                 }],
                 isError: true
@@ -122,7 +122,7 @@ server.tool(
                 content: [{
                     type: "text" as const,
                     text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://www.clawcard.store/dashboard/agents\n" +
+                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents\n" +
                         "👉 Then SET it as the 'Z_ZERO_API_KEY' environment variable and RESTART."
                 }],
                 isError: true
@@ -164,7 +164,7 @@ server.tool(
                 content: [{
                     type: "text" as const,
                     text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://www.clawcard.store/dashboard/agents\n" +
+                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents\n" +
                         "👉 Then SET it as the 'Z_ZERO_API_KEY' environment variable and RESTART."
                 }],
                 isError: true
@@ -195,7 +195,7 @@ server.tool(
         return {
             content: [{
                 type: "text" as const,
-                text: "No Base wallet found. Please create one at https://www.clawcard.store/dashboard/agent-wallet",
+                text: "No Base wallet found. Please create one at https://z-zero.xyz/dashboard/agent-wallet",
             }],
             isError: true,
         };
@@ -229,7 +229,7 @@ server.tool(
                 content: [{
                     type: "text" as const,
                     text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://www.clawcard.store/dashboard/agents"
+                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents"
                 }],
                 isError: true
             };
@@ -303,7 +303,7 @@ server.tool(
             .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
     },
     async ({ domain }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             const resp = await fetch(`${ZZERO_API}/api/checkout-hints?domain=${encodeURIComponent(domain)}&fields=merchant`, {
@@ -389,7 +389,7 @@ server.tool(
                 content: [{
                     type: "text" as const,
                     text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://www.clawcard.store/dashboard/agents"
+                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents"
                 }],
                 isError: true
             };
@@ -518,7 +518,7 @@ server.tool(
                 content: [{
                     type: "text" as const,
                     text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://www.clawcard.store/dashboard/agents"
+                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents"
                 }],
                 isError: true
             };
@@ -614,7 +614,7 @@ server.tool(
     {
         api_key: z
             .string()
-            .describe("The new Passport Key to activate. Must start with 'zk_live_' or 'zk_test_'. Get from: https://www.clawcard.store/dashboard/agents"),
+            .describe("The new Passport Key to activate. Must start with 'zk_live_' or 'zk_test_'. Get from: https://z-zero.xyz/dashboard/agents"),
     },
     async ({ api_key }) => {
         // Step 1: Format validation
@@ -627,7 +627,7 @@ server.tool(
         }
 
         // Step 2: Validate new key against Dashboard API before swapping
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
         try {
             const resp = await fetch(`${ZZERO_API}/api/wdk/balance`, {
                 headers: {
@@ -638,7 +638,7 @@ server.tool(
             });
             if (resp.status === 401) {
                 return {
-                    content: [{ type: "text" as const, text: `❌ Key rejected by server — invalid or deactivated. Please check your key at https://www.clawcard.store/dashboard/agents` }],
+                    content: [{ type: "text" as const, text: `❌ Key rejected by server — invalid or deactivated. Please check your key at https://z-zero.xyz/dashboard/agents` }],
                     isError: true,
                 };
             }
@@ -737,7 +737,7 @@ server.tool(
                     key_hint: hasKey ? maskKey(key) : null,
                     note: hasKey
                         ? "Key is active. Call set_api_key to update it."
-                        : "No key configured. Call set_api_key with your Passport Key from https://www.clawcard.store/dashboard/agents",
+                        : "No key configured. Call set_api_key with your Passport Key from https://z-zero.xyz/dashboard/agents",
                 }, null, 2),
             }],
         };
@@ -757,7 +757,7 @@ server.tool(
             .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
     },
     async ({ checkout_url, card_alias }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
         const API_KEY = getPassportKey();  // ✅ FIX: use hot-swap key store, not process.env
 
         // Spend guard for the autonomous path. auto_pay derives the amount itself
@@ -956,7 +956,7 @@ server.tool(
             .describe("Brief description of what went wrong, e.g. 'Could not find card number field' or 'Page redirected to CAPTCHA'."),
     },
     async ({ url, error_type, error_message }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://www.clawcard.store";
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             await fetch(`${ZZERO_API}/api/checkout-hints`, {

@@ -78,7 +78,7 @@ Z-ZERO is not a checkout bot — it's payment infrastructure for the agentic-com
 - **An open standard for agent payments** — any agent platform plugs in via MCP; any rail (cards, USDC, x402) can be added.
 - **KYA — Know Your Agent** — verifiable agent reputation. The question isn't "can this agent pay?" but "should you trust it to?"
 
-📖 Full vision & architecture: [The Z-Zero Whitebook](https://www.clawcard.store/whitebook)
+📖 Full vision & architecture: [The Z-Zero Whitebook](https://z-zero.xyz/whitebook)
 
 ---
 
@@ -104,7 +104,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-Get your Passport Key at: **[clawcard.store/dashboard/agents](https://www.clawcard.store/dashboard/agents)**
+Get your Passport Key at: **[z-zero.xyz/dashboard/agents](https://z-zero.xyz/dashboard/agents)**
 
 ---
 
@@ -165,14 +165,14 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 
 ## REST API Reference
 
-The Z-ZERO backend is hosted at `https://www.clawcard.store`. All endpoints require a `Bearer` token using your Passport Key.
+The Z-ZERO backend is hosted at `https://z-zero.xyz`. All endpoints require a `Bearer` token using your Passport Key.
 
 > ⚠️ **Use the MCP tools above instead of calling REST directly.** If you must call REST, use the exact paths below.
 
 ### `GET /api/tokens/cards`
 Returns your card list, balance, and deposit addresses.
 ```bash
-curl -X GET "https://www.clawcard.store/api/tokens/cards" \
+curl -X GET "https://z-zero.xyz/api/tokens/cards" \
   -H "Authorization: Bearer zk_live_your_key"
 ```
 
@@ -196,7 +196,7 @@ Cancel an unused token (refunds balance).
 ## Troubleshooting
 
 ### "Z_ZERO_API_KEY is missing"
-1. Go to [clawcard.store/dashboard/agents](https://www.clawcard.store/dashboard/agents)
+1. Go to [z-zero.xyz/dashboard/agents](https://z-zero.xyz/dashboard/agents)
 2. Copy your Passport Key (starts with `zk_live_`)
 3. Add it to your config as `Z_ZERO_API_KEY`
 4. **Restart** Claude Desktop / Cursor

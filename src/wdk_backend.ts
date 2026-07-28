@@ -11,7 +11,7 @@
 import type { CardData, PaymentToken } from "./types.js";
 import { getPassportKey, hasPassportKey } from "./lib/key-store.js";
 
-const API_BASE_URL = process.env.Z_ZERO_API_BASE_URL || "https://www.clawcard.store";
+const API_BASE_URL = process.env.Z_ZERO_API_BASE_URL || "https://z-zero.xyz";
 const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
 
 // Injected at build time — always reflects the actual running version
@@ -19,7 +19,7 @@ import { CURRENT_MCP_VERSION } from "./version.js";
 
 if (!hasPassportKey()) {
     console.error("❌ ERROR: Z_ZERO_API_KEY (Passport Key) is missing!");
-    console.error("🔐 Get your key: https://www.clawcard.store/dashboard/agents");
+    console.error("🔐 Get your key: https://z-zero.xyz/dashboard/agents");
     console.error("🛠️  Or call the set_api_key MCP tool to set it without restarting.");
 }
 
@@ -103,7 +103,7 @@ export async function getBalanceRemote(cardAlias: string): Promise<any> {
     if (data?.error) {
         return {
             error: true,
-            message: 'Base wallet not connected. Create one at https://www.clawcard.store/dashboard/agent-wallet'
+            message: 'Base wallet not connected. Create one at https://z-zero.xyz/dashboard/agent-wallet'
         };
     }
 
@@ -127,7 +127,7 @@ export async function getDepositAddressesRemote(): Promise<any> {
     if (data?.error) {
         return {
             error: true,
-            message: 'Base wallet not connected. Create one at https://www.clawcard.store/dashboard/agent-wallet'
+            message: 'Base wallet not connected. Create one at https://z-zero.xyz/dashboard/agent-wallet'
         };
     }
 

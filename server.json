@@ -6,19 +6,19 @@
     "url": "https://github.com/Dempty-glitch/Z-Zero-mcp",
     "source": "github"
   },
-  "version": "1.5.1",
-  "websiteUrl": "https://www.clawcard.store",
+  "version": "1.6.0",
+  "websiteUrl": "https://z-zero.xyz",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "z-zero-mcp-server",
-      "version": "1.5.1",
+      "version": "1.6.0",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
           "name": "Z_ZERO_API_KEY",
-          "description": "Passport Key (zk_live_...) from clawcard.store/dashboard/agents",
+          "description": "Passport Key (zk_live_...) from z-zero.xyz/dashboard/agents",
           "isRequired": true,
           "isSecret": true
         }

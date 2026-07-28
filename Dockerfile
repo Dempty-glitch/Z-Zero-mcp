@@ -48,7 +48,7 @@ RUN npm install --production
 RUN npx playwright install chromium
 
 # Environment variables (to be overridden at runtime)
-ENV Z_ZERO_API_BASE_URL="https://www.clawcard.store"
+ENV Z_ZERO_API_BASE_URL="https://z-zero.xyz"
 ENV PORT=3001
 
 EXPOSE 3001

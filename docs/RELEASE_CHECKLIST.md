@@ -1,6 +1,6 @@
 # Release Checklist — z-zero-mcp-server
 
-Mỗi lần release npm, đi đủ các bước sau **theo thứ tự**. Đừng bỏ bước 5-7 — đó là lý do MCP Registry từng stale ở 1.3.4 suốt nhiều tháng.
+Mỗi lần release npm, đi đủ các bước sau **theo thứ tự**. Đừng bỏ bước 5-8 — bước 7 là lý do MCP Registry từng stale ở 1.3.4 suốt nhiều tháng, và bước 6 (khác repo) là lý do agent cũ không được báo nâng cấp.
 
 ## 1. Bump version
 ```bash
@@ -27,13 +27,30 @@ npm publish
 git add package.json package-lock.json server.json && git commit -m "release: vX.Y.Z" && git push
 ```
 
-## 6. Republish MCP Registry ← BƯỚC HAY QUÊN
+## 6. Sync `/api/version` bên DASHBOARD ← KHÁC REPO, DỄ QUÊN NHẤT & HẬU QUẢ NẶNG NHẤT
+
+Repo `z-zero-dashboard` → `src/app/api/version/route.ts`:
+- `LATEST_MCP_VERSION` = version vừa publish.
+- Thêm 1 dòng vào `RELEASE_NOTES` cho version đó (agent ĐỌC câu này để biết vì sao phải nâng).
+- Nếu homepage có nhãn version (`MCP_VERSION` trong `src/app/page.tsx`) + dòng SHIPPED thì cập nhật cùng lượt.
+- Build + push (push main = deploy).
+
+**Vì sao không được bỏ:** đây là **kênh DUY NHẤT** báo cho agent đang chạy bản cũ biết mình lỗi thời — MCP gửi header `X-MCP-Version`, backend so với `LATEST_MCP_VERSION` rồi trả cảnh báo. Để lệch thì:
+- agent cũ **không bao giờ được nhắc nâng cấp** → nó tiếp tục chạy bản có lỗi đã sửa;
+- nguy hiểm nhất là các bản **trước 1.6** (trỏ API về host cũ `clawcard.store`, giờ 301 sang z-zero.xyz — redirect cross-domain **làm rơi header Authorization** → gọi API fail, và fail IM LẶNG);
+- lệch ngược (endpoint ghi version cao hơn npm) thì agent bị bảo nâng lên bản không tồn tại.
+
+⚠️ Làm bước này **SAU** khi npm publish xong (bước 4) — quảng bá một version chưa có trên npm là đẩy agent vào ngõ cụt.
+
+*(Sự cố có thật: 29/07/2026 npm đã 1.6.1 trong khi endpoint còn 1.5.1 — trôi 2 version qua đúng đợt đổi domain.)*
+
+## 7. Republish MCP Registry ← BƯỚC HAY QUÊN
 ```bash
 mcp-publisher login github   # auth GitHub (namespace io.github.Dempty-glitch), chỉ cần khi token hết hạn
 mcp-publisher publish        # chạy từ root repo, đọc server.json
 ```
 
-## 7. Verify registry
+## 8. Verify registry
 ```bash
 curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=z-zero"
 ```

@@ -1,6 +1,6 @@
 {
     "name": "z-zero-mcp-server",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "description": "Z-ZERO MCP Server — Secure JIT Virtual Card Payment tools for AI Agents (Claude, Cursor, AutoGPT) — Real Single-Use Virtual Cards, settled in USDC on Base",
     "main": "dist/index.js",
     "bin": {
@@ -10,8 +10,7 @@
         "build": "tsc",
         "start": "node dist/index.js",
         "dev": "npx tsx src/index.ts",
-        "prepublishOnly": "npm run build",
-        "postinstall": "echo 'IMPORTANT: Run \"npx playwright install chromium\" to enable automated checkouts.'"
+        "prepublishOnly": "npm run build"
     },
     "keywords": [
         "mcp",
@@ -39,10 +38,19 @@
         "README.md"
     ],
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.12.1",
-        "dotenv": "^16.5.0",
-        "playwright": "^1.52.0",
-        "zod": "^3.25.11"
+        "@modelcontextprotocol/sdk": "^1.30.0",
+        "playwright": "^1.62.0",
+        "zod": "^3.25.76"
+    },
+    "overrides": {
+        "es-define-property": "npm:@socketregistry/es-define-property@^1.0.7",
+        "function-bind": "npm:@socketregistry/function-bind@^1.0.7",
+        "gopd": "npm:@socketregistry/gopd@^1.0.7",
+        "has-symbols": "npm:@socketregistry/has-symbols@^1.0.7",
+        "hasown": "npm:@socketregistry/hasown@^1.0.7",
+        "object-assign": "npm:@socketregistry/object-assign@^1.0.5",
+        "safer-buffer": "npm:@socketregistry/safer-buffer@^1.0.10",
+        "side-channel": "npm:@socketregistry/side-channel@^1.0.10"
     },
     "devDependencies": {
         "@types/node": "^22.15.21",

@@ -1174,8 +1174,10 @@ server.tool(
 // ============================================================
 server.tool(
     "verify_receipt",
-    "Check where an order ENDED UP, and prove it. Returns `status` — 'completed' (bought, issuer has not reported yet), 'settled' (issuer confirmed the charge), or 'reversed' (declined/voided/refunded — the order does NOT stand) — plus `is_final`, the signed receipt, and signature validity. " +
-    "Read `status` FIRST: a receipt is proof the purchase happened, but an order can be reversed afterwards, and the reversal is what the user needs to hear. If you told the user a purchase was done and this later returns 'reversed', tell them, unprompted.",
+    "Check where an order ENDED UP, and prove it. Returns TWO separate axes: " +
+    "`order_status` — 'completed' (bought, issuer not reported yet) · 'settled' (issuer confirmed) · 'reversed' (auth voided before clearing — the order does NOT stand) · 'partially_refunded' / 'refunded' (merchant returned money AFTER settlement — the order still happened) — " +
+    "and `funds_status` — 'no_payout_due' · 'payout_pending' (money owed back but not yet confirmed on-chain) · 'returned' (confirmed on-chain). " +
+    "Read BOTH before speaking: 'reversed' or 'refunded' with funds 'payout_pending' means the buyer has NOT got the money back yet — never say they have. If you told the user a purchase was done and a later check returns 'reversed', tell them unprompted.",
     {
         receipt_id: z
             .string()
@@ -1274,13 +1276,17 @@ Tools: \`get_merchant_hints\`, \`request_payment_token\`, \`execute_payment\`, \
    On success you get \`signed_receipt\` (+ verify_url): a signed statement of what actually settled,
    diffed against the intent. Share verify_url with the user — prove the purchase, don't claim it.
 
-7. **After a confirmed purchase, say it is bought — then watch for a reversal.**
+7. **After a confirmed purchase, say it is bought — then watch what the issuer says.**
    \`status: confirmed\` means the order was really placed, so tell the user it is done; do not
-   hedge. But the card issuer reports minutes later, and an order CAN be reversed (declined,
-   voided, refunded). If you check back — or the user asks — call \`verify_receipt(receipt_id)\`
-   and read \`status\`: 'completed' (not reported yet) · 'settled' (issuer confirmed, final) ·
-   'reversed' (the order does NOT stand — the money went back). If it comes back 'reversed'
-   after you already said it was bought, correct yourself immediately and unprompted.
+   hedge. The card issuer reports minutes later. When you check back — or the user asks — call
+   \`verify_receipt(receipt_id)\` and read BOTH axes:
+   · \`order_status\`: 'completed' → 'settled' (confirmed) · 'reversed' (auth voided — the order
+     does NOT stand) · 'partially_refunded'/'refunded' (merchant returned money; the order
+     itself still happened).
+   · \`funds_status\`: 'payout_pending' means money is owed back but NOT yet confirmed on-chain —
+     never tell the user their money is back until it says 'returned'.
+   If order_status comes back 'reversed' after you already said it was bought, correct
+   yourself immediately and unprompted.
 
 ⛔ Never call \`request_payment_token\` before BOTH: shipping submitted AND card fields + final total visible.
 

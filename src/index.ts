@@ -1174,7 +1174,8 @@ server.tool(
 // ============================================================
 server.tool(
     "verify_receipt",
-    "Verify a Z-Zero signed receipt by id. Returns the receipt (what was authorized vs what actually settled, and any diff) plus signature validity. Use this to PROVE to the user that a purchase really happened — never claim a purchase succeeded from memory when a receipt exists.",
+    "Check where an order ENDED UP, and prove it. Returns `status` — 'completed' (bought, issuer has not reported yet), 'settled' (issuer confirmed the charge), or 'reversed' (declined/voided/refunded — the order does NOT stand) — plus `is_final`, the signed receipt, and signature validity. " +
+    "Read `status` FIRST: a receipt is proof the purchase happened, but an order can be reversed afterwards, and the reversal is what the user needs to hear. If you told the user a purchase was done and this later returns 'reversed', tell them, unprompted.",
     {
         receipt_id: z
             .string()
@@ -1272,6 +1273,14 @@ Tools: \`get_merchant_hints\`, \`request_payment_token\`, \`execute_payment\`, \
 6. \`execute_payment(token, checkout_url, actual_amount = final total)\`. ALWAYS pass actual_amount.
    On success you get \`signed_receipt\` (+ verify_url): a signed statement of what actually settled,
    diffed against the intent. Share verify_url with the user — prove the purchase, don't claim it.
+
+7. **After a confirmed purchase, say it is bought — then watch for a reversal.**
+   \`status: confirmed\` means the order was really placed, so tell the user it is done; do not
+   hedge. But the card issuer reports minutes later, and an order CAN be reversed (declined,
+   voided, refunded). If you check back — or the user asks — call \`verify_receipt(receipt_id)\`
+   and read \`status\`: 'completed' (not reported yet) · 'settled' (issuer confirmed, final) ·
+   'reversed' (the order does NOT stand — the money went back). If it comes back 'reversed'
+   after you already said it was bought, correct yourself immediately and unprompted.
 
 ⛔ Never call \`request_payment_token\` before BOTH: shipping submitted AND card fields + final total visible.
 

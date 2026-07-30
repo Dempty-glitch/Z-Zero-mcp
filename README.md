@@ -17,7 +17,8 @@ npx z-zero-mcp-server
 - ⛽ **Gasless USDC on Base** — auto-detects crypto checkout (EIP-681) and settles as a gasless USDC transfer sponsored by Coinbase Paymaster. The agent holds only USDC — no ETH, no gas UX.
 - 💳 **JIT single-use virtual cards** — amount-locked, 1-hour TTL, burned after a single use. Fiat fallback for the rest of the web.
 - 🧠 **Smart Routing + checkout intelligence** — `get_merchant_hints` serves platform-specific checkout playbooks (Shopify, Etsy, WooCommerce…).
-- 🔄 **Self-healing network** — every failed checkout is logged via `report_checkout_fail` and feeds back into the hints database. The system doesn't just retry; it evolves.
+- ✍️ **Signed intent + signed receipt** — the card is bound to a signed statement of *what it is for*, and every confirmed purchase returns a signed receipt with a diff against that intent. The agent can **prove** a purchase instead of claiming one (`verify_receipt`, public verify page).
+- 🔄 **Structured failure labels** — failed checkouts are labeled with a fixed 14-class `failure_class` (automatically, not only when an agent remembers to report) and stored as evidence for the merchant knowledge base. Facts are promoted into shared hints only after a later outcome or review verifies them.
 
 ---
 
@@ -146,8 +147,8 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 
 | Tool | Description |
 |------|-------------|
-| `request_payment_token` | Issue a JIT single-use virtual-card token for a specific amount (1hr TTL) |
-| `execute_payment` | Auto-fill checkout form using a payment token via Playwright |
+| `request_payment_token` | Issue a JIT single-use virtual-card token for a specific amount (1hr TTL). Pass `cart` + `ship_to` and the card is bound to a **signed intent** |
+| `execute_payment` | Auto-fill checkout form using a payment token via Playwright. Returns a **signed receipt** on confirmed payments |
 | `cancel_payment_token` | Cancel an unused token and refund to wallet |
 | `request_human_approval` | Pause and request human confirmation before proceeding |
 
@@ -157,9 +158,71 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 |------|-------------|
 | `auto_pay_checkout` | Fully autonomous checkout — auto-detects Web3 or Fiat and completes payment |
 | `get_merchant_hints` | Fetch platform-specific checkout playbook (pre-steps + selectors) from Knowledge Base |
-| `report_checkout_fail` | Log a failed checkout URL for admin review (self-healing feedback loop) |
+| `report_checkout_fail` | Report a failed checkout with a **structured `failure_class`** (14-class enum) — feeds the self-healing loop |
+| `verify_receipt` | Verify a signed receipt by id — prove a purchase happened instead of claiming it |
 
 > 📖 **Note:** Version checking is handled automatically in each API call. No separate tool needed.
+
+---
+
+## Agent primitives (v1.7.0)
+
+Three things an agent can do here that it cannot do with a normal virtual card.
+
+### 1. Signed intent — the card knows what it is for
+
+Pass the cart when you request a token:
+
+```jsonc
+request_payment_token({
+  card_alias: "Card_01",
+  amount: 44.00,
+  merchant: "etsy.com",
+  cart: [{ title: "Ceramic mug — matte white", qty: 2, unit_price: 18.50 }],
+  ship_to: "12 Nguyen Hue, District 1, Ho Chi Minh City, VN"
+})
+```
+
+Z-ZERO signs that statement (EIP-191) and binds it to the card. The user gets
+cryptographic proof of **what this card was authorized to buy** — not just how
+much it could spend. The shipping address is stored as a hash, never raw.
+
+**Before you request a token, compare the checkout page with what the user actually
+asked for** — same items, same quantity, same variant, same destination. A mismatch
+you catch there costs nothing. After the token, it costs a card.
+
+### 2. Signed receipt — prove the purchase, don't claim it
+
+On a confirmed payment you get back:
+
+```jsonc
+"signed_receipt": {
+  "receipt_id": "8ea36791-…",
+  "receipt_hash": "0x…",
+  "match": { "total": "over", "domain": "ok" },
+  "diff":  [{ "field": "total", "expected": 44.00, "observed": 46.75 }],
+  "verify_url": "https://z-zero.xyz/receipt/8ea36791-…"
+}
+```
+
+`diff` is the part that matters: it is what the merchant actually did versus what
+was authorized. Share `verify_url` with the user — the page is public and anyone
+can check it. Verification is three checks: the signature is valid, the signer is
+Z-ZERO, and the fields shown still hash to what was signed (so editing the record
+afterwards is detectable, including by us).
+
+### 3. Structured failure classes — every failure teaches the network
+
+`report_checkout_fail` takes a fixed enum, not free text:
+
+`card_declined_issuer` · `card_declined_bin_block` · `avs_mismatch` · `3ds_required` ·
+`bot_detected` · `form_changed` · `price_changed` · `out_of_stock` ·
+`shipping_unsupported` · `login_required` · `timeout` · `outcome_unconfirmed` ·
+`intent_mismatch` · `unknown`
+
+Failed runs are also labeled automatically from the browser outcome, so the network
+learns even when nobody remembers to report. Card numbers are redacted at capture —
+they never reach a log, screenshot or DOM dump.
 
 ---
 

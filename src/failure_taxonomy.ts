@@ -68,10 +68,17 @@ export interface CheckoutEvent {
 // Screenshots/DOM/HAR/messages must never contain PAN or CVV.
 // ------------------------------------------------------------
 
-/** Mask any 12–19 digit sequence (with optional space/dash separators) and CVV-looking patterns. */
+/**
+ * Mask any 12–19 digit sequence (with optional space/dash separators) and CVV-looking patterns.
+ *
+ * NFKC first: full-width digits (４２４２…) read as a card number to a human and
+ * to anything downstream, but slip past an ASCII \d regex. Normalising folds
+ * them to ASCII so one pattern catches both forms.
+ */
 export function redactCardData(text: string): string {
     if (!text) return text;
     return text
+        .normalize("NFKC")
         // PAN: 12-19 digits, allowing spaces or dashes between groups
         .replace(/\b(?:\d[ -]?){12,19}\b/g, "[PAN_REDACTED]")
         // CVV mentioned next to a 3-4 digit number

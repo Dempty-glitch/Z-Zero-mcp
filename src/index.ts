@@ -522,7 +522,12 @@ server.tool(
         // Step 3: Burn the token ONLY on a CONFIRMED payment (result.success === status 'confirmed').
         // Every other outcome (declined / unconfirmed / not_submitted / no_fields / error) leaves the
         // token UNBURNED so the funds stay recoverable. "Filled a field" is NOT a payment.
-        if (!result.success) {
+        // ONE gate for the irreversible step. `success` is a boolean the bridge sets;
+        // `status` is the outcome it observed. Burning a token cannot be undone, so it
+        // requires both to say the merchant confirmed the order (backtest E07).
+        const isConfirmed = result.success && result.status === 'confirmed';
+
+        if (!isConfirmed) {
             // `declined` = merchant rejected → webhook refund flow handles it.
             // Everything else = we couldn't prove a charge happened → funds stay locked, recoverable.
             const isDeclined = result.status === 'declined';
@@ -564,7 +569,8 @@ server.tool(
             };
         }
 
-        // Confirmed — burn the token, passing the REAL receipt id if one was scraped.
+        // Past the gate above, so status === 'confirmed'. Burn, passing the REAL
+        // receipt id if one was scraped.
         await burnTokenRemote(token, result.receipt_id);
 
         // Step 4: Refund underspend if actual amount was less than token amount
@@ -1023,7 +1029,9 @@ server.tool(
             // Burn ONLY on a confirmed charge. Any other outcome leaves the JIT token unburned
             // so the locked funds are recoverable (cancel/expire/decline-webhook).
             let autoReceipt: any = null;
-            if (fillResult.success) {
+            // Same rule as execute_payment: burning needs both the flag and the
+            // observed status to say confirmed (backtest E07).
+            if (fillResult.success && fillResult.status === 'confirmed') {
                 const burnOk = await burnTokenRemote(token.token, fillResult.receipt_id);
                 if (!burnOk) console.error(`[WARN] Token burn failed for ${token.token} — manual check needed`);
                 // Signed receipt (Primitive 3) — never blocks the confirmed result

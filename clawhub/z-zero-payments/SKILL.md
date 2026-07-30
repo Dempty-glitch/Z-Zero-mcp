@@ -59,15 +59,18 @@ This skill is deliberately boring about money. Three properties are structural, 
 - **Never proceed past a missing approval.** No `request_human_approval` confirmation → no payment. Do not interpret silence as consent.
 - **Respect the budget.** If the operator set a cap and the final total (including shipping) exceeds it, abort and report — do not negotiate with yourself.
 - **Report honestly.** "Filled the form" is not "paid". Read the result `status` and relay it verbatim, including failures.
+- **Prove, don't claim.** A confirmed payment returns a signed receipt with a public `verify_url`. Give it to the operator instead of asserting from memory that the order went through.
 
 ## Buying something (the flow)
 
 1. Read `mcp://resources/sop` (once per session).
 2. `get_merchant_hints` for the target platform (Shopify, Etsy, WooCommerce…) and follow its `pre_steps`.
 3. Navigate the checkout until the **final total including shipping** is visible.
-4. `request_human_approval` with item, merchant, and exact total. Wait.
-5. On approval: `auto_pay_checkout` (it auto-detects crypto vs card checkout and routes — an EIP-681 crypto checkout settles as a gasless USDC transfer on Base; a card checkout uses a JIT single-use virtual card).
-6. Relay the result status. If a checkout failed for a *technical* reason, call `report_checkout_fail` — failures feed the shared hints database, so the network gets smarter with every miss.
+4. **Compare the page with what was actually asked for** — same items, quantity, variant, destination. If anything differs, stop here: no token has been issued, so a mismatch caught now costs nothing.
+5. `request_human_approval` with item, merchant, and exact total. Wait.
+6. On approval: `auto_pay_checkout` (it auto-detects crypto vs card checkout and routes — an EIP-681 crypto checkout settles as a gasless USDC transfer on Base; a card checkout uses a JIT single-use virtual card). For the manual path, pass `cart` and `ship_to` to `request_payment_token` so the card is bound to a **signed intent** — proof of what it was authorized to buy, not just how much it could spend.
+7. Relay the result status and the receipt: `signed_receipt.diff` shows what the merchant actually did versus what was authorized (charged more, swapped an item). `verify_receipt(receipt_id)` re-checks it any time.
+8. If a checkout failed for a *technical* reason, call `report_checkout_fail(url, failure_class, step, error_message)`. `failure_class` is a fixed enum — `card_declined_issuer`, `card_declined_bin_block`, `avs_mismatch`, `3ds_required`, `bot_detected`, `form_changed`, `price_changed`, `out_of_stock`, `shipping_unsupported`, `login_required`, `timeout`, `outcome_unconfirmed`, `intent_mismatch`, `unknown` — so each failure becomes evidence the next agent can use, not a log line.
 
 ## Wallet operations (read-only, no approval needed)
 

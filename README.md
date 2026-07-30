@@ -211,6 +211,14 @@ can check it. Verification is three checks: the signature is valid, the signer i
 Z-ZERO, and the fields shown still hash to what was signed (so editing the record
 afterwards is detectable, including by us).
 
+**What a valid receipt does and does not prove.** It proves the record is signed by
+Z-ZERO and unaltered. It does not by itself prove the merchant charged what the
+receipt says — most fields start life as the agent's reading of a web page. Every
+receipt therefore carries `provenance` per field: `zzero_issued` (the limit we set),
+`issuer_captured` (confirmed by the card issuer's capture webhook — settlement
+evidence), `agent_reported` (unverified), `human_verified`. Until the capture webhook
+lands, this is a **signed execution receipt**, not settlement proof, and it says so.
+
 ### 3. Structured failure classes — every failure teaches the network
 
 `report_checkout_fail` takes a fixed enum, not free text:

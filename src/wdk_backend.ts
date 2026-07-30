@@ -154,7 +154,13 @@ export async function getDepositAddressesRemote(): Promise<any> {
 export async function issueTokenRemote(
     cardAlias: string,
     amount: number,
-    merchant: string
+    merchant: string,
+    intent?: {
+        cart?: Array<{ title: string; qty: number; unit_price?: number; url?: string }>;
+        subtotal?: number;
+        currency?: string;
+        ship_to?: string;
+    }
 ): Promise<any | null> {
     // Base AA Flow (reversed from custodial):
     // 1. Create Partner card first (reservation)
@@ -170,6 +176,9 @@ export async function issueTokenRemote(
         network_id: process.env.NETWORK_ID || "base-usdc",
         session_id: `wdk-${Math.random().toString(36).substring(7)}`,
         wallet_mode: 'wdk',  // Signals Dashboard to use on-chain payment path
+        // Primitive 1: the intent this card is derived from. Server signs it and
+        // returns the signed object; older servers simply ignore this field.
+        ...(intent ? { intent } : {}),
     });
 
     if (!data) return null;
@@ -185,8 +194,27 @@ export async function issueTokenRemote(
         used: false,
         tx_hash: data.tx_hash,
         mode: 'wdk_noncustodial',
+        intent: data.intent || null,     // signed intent (intent_id, hash, signature) if server supports it
         mcp_warning: data._mcp_warning || null,  // Relay backend version warning to agent
     };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Receipt (Primitive 3): ask the Dashboard to build+sign a receipt for a
+// CONFIRMED payment. Never blocks the payment result — caller treats null as
+// "receipt unavailable" and the purchase is still fine.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export async function postReceiptRemote(payload: {
+    token: string;
+    checkout_url: string;
+    merchant_order_id?: string | null;
+    amount_captured?: number;
+    card_last4?: string;
+}): Promise<any | null> {
+    const data = await apiRequest('/api/receipts', 'POST', payload);
+    if (!data || data.error) return null;
+    return data;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -208,6 +236,8 @@ export async function resolveTokenRemote(token: string): Promise<CardData | null
         cvv: data.cvv,
         name: data.name || "Z-ZERO AI AGENT",
         authorized_amount: data.authorized_amount ? Number(data.authorized_amount) : undefined,
+        intent_id: data.intent_id || undefined,      // Primitive 1 linkage (if server supports it)
+        intent_hash: data.intent_hash || undefined,
     };
 }
 

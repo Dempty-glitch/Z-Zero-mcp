@@ -32,6 +32,8 @@ export interface CardData {
     cvv: string;
     name: string;
     authorized_amount?: number;  // Amount authorized when token was issued (for pre-flight guard)
+    intent_id?: string;          // Primitive 1: intent this token is bound to (for event/receipt labeling)
+    intent_hash?: string;
     error?: string;
     message?: string;
 }

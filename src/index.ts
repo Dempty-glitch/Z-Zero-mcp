@@ -21,6 +21,7 @@ const resolveTokenRemote = activeBackend.resolveTokenRemote;
 const burnTokenRemote = activeBackend.burnTokenRemote;
 const cancelTokenRemote = activeBackend.cancelTokenRemote;
 const refundUnderspendRemote = activeBackend.refundUnderspendRemote;
+const postReceiptRemote = activeBackend.postReceiptRemote;
 const getBalanceRemote = activeBackend.getBalanceRemote;
 const listCardsRemote = activeBackend.listCardsRemote;
 const getDepositAddressesRemote = activeBackend.getDepositAddressesRemote;
@@ -36,12 +37,51 @@ import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-p
 import { chromium } from "playwright";
 import { setPassportKey, getPassportKey, persistPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap + rotate-on-connect
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
+import {
+    TAXONOMY_VERSION,
+    FAILURE_CLASSES,
+    CHECKOUT_STEPS,
+    classifyBridgeResult,
+    redactCardData,
+    extractBin,
+    type CheckoutEvent,
+} from "./failure_taxonomy.js";
 
 /** Masked, non-reconstructable hint for a secret key (for debug output only). */
 function maskKey(key: string): string {
     if (!key) return "";
     if (key.length <= 8) return "••••";
     return `${key.slice(0, 4)}…${key.slice(-2)}`;
+}
+
+// ============================================================
+// Structured checkout-event emitter (Primitive 2 — labeling)
+// Fire-and-forget: NEVER blocks or fails the payment flow.
+// Auto-called on every non-confirmed outcome so traffic becomes
+// labeled data even when the agent never calls report_checkout_fail.
+// ============================================================
+function emitCheckoutEvent(evt: CheckoutEvent): void {
+    const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+    const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
+    const body = {
+        ...evt,
+        // 🔴 redact at capture — the event must never carry PAN/CVV
+        error_message: evt.error_message ? redactCardData(evt.error_message).slice(0, 500) : undefined,
+        taxonomy_version: TAXONOMY_VERSION,
+        mcp_version: CURRENT_MCP_VERSION,
+        // Legacy field so an older backend still logs something meaningful
+        error_type: evt.raw_error_type || evt.failure_class,
+    };
+    fetch(`${ZZERO_API}/api/checkout-hints`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${getPassportKey()}`,
+            ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
+            "x-mcp-version": CURRENT_MCP_VERSION,
+        },
+        body: JSON.stringify(body),
+    }).catch(() => { /* logging must never break payments */ });
 }
 
 // ============================================================
@@ -208,7 +248,8 @@ server.tool(
 // ============================================================
 server.tool(
     "request_payment_token",
-    "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead.",
+    "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
+    "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for.",
     {
         card_alias: z
             .string()
@@ -221,9 +262,32 @@ server.tool(
         merchant: z
             .string()
             .describe("Name or URL of the merchant/service being purchased"),
+        cart: z
+            .array(z.object({
+                title: z.string().describe("Item name as shown on the checkout page"),
+                qty: z.number().describe("Quantity"),
+                unit_price: z.number().optional().describe("Unit price if visible"),
+                url: z.string().optional().describe("Product URL if known"),
+            }))
+            .max(50)
+            .optional()
+            .describe("RECOMMENDED: the items you are buying, as the USER agreed to them. This becomes a signed intent bound to the card — proof of what was authorized."),
+        ship_to: z
+            .string()
+            .optional()
+            .describe("Shipping destination as a single string (only a hash is stored, never the raw address)."),
     },
-    async ({ card_alias, amount, merchant }) => {
-        const token = await issueTokenRemote(card_alias, amount, merchant);
+    async ({ card_alias, amount, merchant, cart, ship_to }) => {
+        const intentInput = (cart && cart.length) || ship_to
+            ? {
+                cart,
+                subtotal: cart?.every(i => typeof i.unit_price === "number")
+                    ? Math.round(cart.reduce((s, i) => s + (i.unit_price as number) * i.qty, 0) * 100) / 100
+                    : undefined,
+                ship_to,
+            }
+            : undefined;
+        const token = await issueTokenRemote(card_alias, amount, merchant, intentInput);
         if (token?.error === "AUTH_REQUIRED") {
             return {
                 content: [{
@@ -276,6 +340,14 @@ server.tool(
                             merchant: token.merchant,
                             expires_at: expiresAt,
                             card_issued: true,
+                            ...(token.intent ? {
+                                intent: {
+                                    intent_id: token.intent.intent_id,
+                                    intent_hash: token.intent.intent_hash,
+                                    signer_address: token.intent.signer_address,
+                                    note: "Card is bound to this signed intent. The receipt after purchase will be diffed against it.",
+                                },
+                            } : {}),
                             instructions:
                                 "Use this token with execute_payment within 1 hour. IMPORTANT: If the actual checkout price is HIGHER than the token amount, do NOT proceed — call cancel_payment_token first and request a new token with the correct amount.",
                             ...(token.mcp_warning ? { _mcp_warning: token.mcp_warning } : {}),
@@ -416,6 +488,17 @@ server.tool(
             if (actual_amount > tokenAmount * TOLERANCE) {
                 // Auto-cancel the token to free up funds
                 await cancelTokenRemote(token);
+                // 📊 Labeled event: price moved between authorization and checkout
+                emitCheckoutEvent({
+                    url: checkout_url,
+                    failure_class: "price_changed",
+                    step: "preflight",
+                    raw_error_type: "PRICE_MISMATCH",
+                    error_message: `Checkout total $${actual_amount} exceeds authorized $${tokenAmount} (+5% tolerance)`,
+                    outcome: "aborted",
+                    labeled_by: "auto",
+                    card_bin: extractBin(cardData.number),
+                });
                 return {
                     content: [{
                         type: "text" as const,
@@ -443,6 +526,21 @@ server.tool(
             // `declined` = merchant rejected → webhook refund flow handles it.
             // Everything else = we couldn't prove a charge happened → funds stay locked, recoverable.
             const isDeclined = result.status === 'declined';
+            // 📊 Auto-label every non-confirmed run — this is the corpus (Primitive 2)
+            const label = classifyBridgeResult(result.status, result.message);
+            if (label) {
+                emitCheckoutEvent({
+                    url: checkout_url,
+                    failure_class: label.failure_class,
+                    step: label.step,
+                    raw_error_type: result.status,
+                    error_message: result.message,
+                    outcome: "failed",
+                    labeled_by: "auto",
+                    card_bin: extractBin(cardData.number),
+                    intent_id: cardData.intent_id,
+                });
+            }
             return {
                 content: [
                     {
@@ -474,6 +572,17 @@ server.tool(
             await refundUnderspendRemote(token, actual_amount);
         }
 
+        // Step 4.5: Signed receipt (Primitive 3) — proof of what actually settled,
+        // diffed server-side against the intent this token was bound to.
+        // Never blocks the result: payment is already confirmed at this point.
+        const signedReceipt = await postReceiptRemote({
+            token,
+            checkout_url,
+            merchant_order_id: result.receipt_id || null,
+            amount_captured: actual_amount,
+            card_last4: cardData.number ? cardData.number.replace(/\D/g, "").slice(-4) : undefined,
+        }).catch(() => null);
+
         // Step 5: Return result (NEVER includes card numbers)
         return {
             content: [
@@ -486,6 +595,16 @@ server.tool(
                             message: result.message,
                             receipt_id: result.receipt_id || null,
                             token_status: "BURNED",
+                            ...(signedReceipt ? {
+                                signed_receipt: {
+                                    receipt_id: signedReceipt.receipt?.receipt_id,
+                                    receipt_hash: signedReceipt.receipt_hash,
+                                    match: signedReceipt.receipt?.match,
+                                    diff: signedReceipt.receipt?.diff,
+                                    verify_url: signedReceipt.verify_url || null,
+                                    note: "Cryptographically signed proof of this purchase. Share verify_url with the user — anyone can check it.",
+                                },
+                            } : {}),
                             note: "Token has been permanently invalidated after this confirmed transaction.",
                         },
                         null,
@@ -851,6 +970,16 @@ server.tool(
             const totalPrice = await extractTotalPrice(page);
 
             if (!totalPrice) {
+                // 📊 Price extraction failed = DOM we don't understand → form_changed
+                emitCheckoutEvent({
+                    url: checkout_url,
+                    failure_class: "form_changed",
+                    step: "navigate",
+                    raw_error_type: "PRICE_NOT_FOUND",
+                    error_message: "Could not extract total price from checkout page",
+                    outcome: "aborted",
+                    labeled_by: "auto",
+                });
                 return {
                     content: [{ type: "text" as const, text: JSON.stringify({
                         route: "FIAT", status: "PRICE_NOT_FOUND",
@@ -893,12 +1022,35 @@ server.tool(
 
             // Burn ONLY on a confirmed charge. Any other outcome leaves the JIT token unburned
             // so the locked funds are recoverable (cancel/expire/decline-webhook).
+            let autoReceipt: any = null;
             if (fillResult.success) {
                 const burnOk = await burnTokenRemote(token.token, fillResult.receipt_id);
                 if (!burnOk) console.error(`[WARN] Token burn failed for ${token.token} — manual check needed`);
+                // Signed receipt (Primitive 3) — never blocks the confirmed result
+                autoReceipt = await postReceiptRemote({
+                    token: token.token,
+                    checkout_url,
+                    merchant_order_id: fillResult.receipt_id || null,
+                    amount_captured: totalPrice,
+                    card_last4: cardData.number ? cardData.number.replace(/\D/g, "").slice(-4) : undefined,
+                }).catch(() => null);
             } else {
                 // Release the freshly-issued JIT token so the price funds don't sit locked on a non-payment.
                 await cancelTokenRemote(token.token).catch(() => {});
+                // 📊 Auto-label the failed run (Primitive 2 corpus)
+                const label = classifyBridgeResult(fillResult.status, fillResult.message);
+                if (label) {
+                    emitCheckoutEvent({
+                        url: checkout_url,
+                        failure_class: label.failure_class,
+                        step: label.step,
+                        raw_error_type: fillResult.status,
+                        error_message: fillResult.message,
+                        outcome: "failed",
+                        labeled_by: "auto",
+                        card_bin: extractBin(cardData.number),
+                    });
+                }
             }
 
             return {
@@ -914,6 +1066,14 @@ server.tool(
                         ? `✅ Confirmed: JIT card issued (limit $${issueAmount}) and order confirmed by merchant for ~$${totalPrice}.`
                         : `❌ Not confirmed (${fillResult.status}): ${fillResult.message} Token released.`,
                     receipt_id: fillResult.receipt_id || null,
+                    ...(autoReceipt ? {
+                        signed_receipt: {
+                            receipt_id: autoReceipt.receipt?.receipt_id,
+                            receipt_hash: autoReceipt.receipt_hash,
+                            match: autoReceipt.receipt?.match,
+                            verify_url: autoReceipt.verify_url || null,
+                        },
+                    } : {}),
                 }, null, 2) }],
                 isError: !fillResult.success,
             };
@@ -921,6 +1081,19 @@ server.tool(
         } catch (err: any) {
             // ✅ FIX 8: Sanitize error message before returning to agent — avoid leaking internal paths
             const safeMsg = (err?.message || String(err)).replace(/\/.*(src|dist)\/.*\.ts/g, '[internal]').slice(0, 200);
+            // 📊 Label the exception path too (timeout vs unknown)
+            const label = classifyBridgeResult("error", safeMsg);
+            if (label) {
+                emitCheckoutEvent({
+                    url: checkout_url,
+                    failure_class: label.failure_class,
+                    step: label.step,
+                    raw_error_type: "EXCEPTION",
+                    error_message: safeMsg,
+                    outcome: "failed",
+                    labeled_by: "auto",
+                });
+            }
             return {
                 content: [{ type: "text" as const, text: JSON.stringify({
                     status: "ERROR", message: safeMsg,
@@ -941,45 +1114,83 @@ server.tool(
 // ============================================================
 server.tool(
     "report_checkout_fail",
-    "Report a checkout URL that you could not complete. Call this when you failed to finish a purchase — for any reason (field not found, bot blocked, timeout, unknown form). The URL will be logged for admin review to improve future checkout success rates. This is part of Z-ZERO's self-healing loop.",
+    "Report a checkout you could not complete. Pick the failure_class that best matches what you saw — this feeds Z-ZERO's self-healing loop (labeled failures become better merchant hints for the next run). If nothing fits, use 'unknown' and describe what happened in error_message.",
     {
         url: z
             .string()
             .url()
             .describe("The checkout/payment page URL where the purchase failed."),
-        error_type: z
-            .string()
-            .describe("Short error category: 'field_not_found', 'timeout', 'bot_blocked', 'unknown_form', 'price_mismatch', or 'other'."),
+        failure_class: z
+            .enum(FAILURE_CLASSES)
+            .describe(
+                "Fixed failure class: 'card_declined_issuer' (card rejected by bank), 'card_declined_bin_block' (merchant refuses prepaid/virtual cards), 'avs_mismatch' (billing address rejected), '3ds_required' (extra verification/SCA screen appeared), 'bot_detected' (CAPTCHA/Cloudflare/'unusual activity'), 'form_changed' (expected field or button not found), 'price_changed' (total differs from expected), 'out_of_stock', 'shipping_unsupported' (cannot ship to address), 'login_required' (checkout demands an account), 'timeout', 'outcome_unconfirmed' (submitted but no confirmation seen), or 'unknown'."
+            ),
+        step: z
+            .enum(CHECKOUT_STEPS)
+            .optional()
+            .describe("Where it failed: 'navigate' (page load), 'pre_steps' (shipping/navigation steps), 'fill_form' (card fields), 'submit' (Pay button), 'confirm' (after submitting)."),
         error_message: z
             .string()
             .optional()
-            .describe("Brief description of what went wrong, e.g. 'Could not find card number field' or 'Page redirected to CAPTCHA'."),
+            .describe("Brief description of what you saw, e.g. 'Card number field is inside a new iframe' or 'Page redirected to CAPTCHA'. NEVER include card numbers."),
+        remediation_tried: z
+            .string()
+            .optional()
+            .describe("What you already tried before giving up, e.g. 'retried with submit_selector from hints'."),
     },
-    async ({ url, error_type, error_message }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
-        const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
-        try {
-            await fetch(`${ZZERO_API}/api/checkout-hints`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${getPassportKey()}`,
-                    ...(INTERNAL_SECRET ? { "x-internal-secret": INTERNAL_SECRET } : {}),
-                    "x-mcp-version": CURRENT_MCP_VERSION,
-                },
-                body: JSON.stringify({ url, error_type, error_message, mcp_version: CURRENT_MCP_VERSION }),
-            });
-        } catch {
-            // Fire-and-forget — never block the agent on a logging call
-        }
+    async ({ url, failure_class, step, error_message, remediation_tried }) => {
+        emitCheckoutEvent({
+            url,
+            failure_class,
+            step,
+            error_message,
+            remediation_tried,
+            outcome: "failed",
+            labeled_by: "agent",
+        });
         return {
             content: [{ type: "text" as const, text: JSON.stringify({
                 logged: true,
                 url,
-                error_type,
-                message: "Checkout failure logged. Admin will review and improve hints for this domain.",
+                failure_class,
+                message: "Checkout failure recorded with a structured label. This improves merchant hints for future runs.",
             }, null, 2) }],
         };
+    }
+);
+
+// ============================================================
+// TOOL: Verify a signed receipt (Primitive 3)
+// Lets the agent PROVE a purchase happened instead of claiming it.
+// Public endpoint — anyone with the receipt_id can verify.
+// ============================================================
+server.tool(
+    "verify_receipt",
+    "Verify a Z-Zero signed receipt by id. Returns the receipt (what was authorized vs what actually settled, and any diff) plus signature validity. Use this to PROVE to the user that a purchase really happened — never claim a purchase succeeded from memory when a receipt exists.",
+    {
+        receipt_id: z
+            .string()
+            .describe("The receipt_id returned by execute_payment / auto_pay_checkout (signed_receipt.receipt_id)."),
+    },
+    async ({ receipt_id }) => {
+        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+        try {
+            const resp = await fetch(`${ZZERO_API}/api/receipts/${encodeURIComponent(receipt_id)}`, {
+                headers: { "x-mcp-version": CURRENT_MCP_VERSION },
+            });
+            const data = await resp.json();
+            return {
+                content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+            };
+        } catch (err: any) {
+            return {
+                content: [{ type: "text" as const, text: JSON.stringify({
+                    found: false,
+                    message: `Could not reach receipts API: ${err?.message || "unknown error"}. The receipt may still be valid — try the public verify page.`,
+                }, null, 2) }],
+                isError: true,
+            };
+        }
     }
 );
 
@@ -1042,8 +1253,17 @@ Tools: \`get_merchant_hints\`, \`request_payment_token\`, \`execute_payment\`, \
 2. Follow \`pre_steps\` in YOUR browser: navigate, add to cart, submit shipping (ask the user via
    \`request_human_approval\` if shipping info is unknown).
 3. Wait until the card section is visible AND the FINAL total (incl. shipping + tax) is shown.
-4. \`request_payment_token(card_alias, amount = exact final total, merchant)\` → one-time token, valid 1h.
-5. \`execute_payment(token, checkout_url, actual_amount = final total)\`. ALWAYS pass actual_amount.
+4. **INTENT CHECK (do this yourself — it is free):** look at the checkout page one more time and compare
+   it with what the user actually asked for: same items, same quantity, same variant/size/color, same
+   destination. If ANYTHING differs → do NOT request a token. Fix the cart or ask the user. A mismatch
+   caught now costs nothing; after the token it costs a card. If you give up on the mismatch, call
+   \`report_checkout_fail\` with failure_class \`intent_mismatch\`.
+5. \`request_payment_token(card_alias, amount = exact final total, merchant, cart = items as the user
+   agreed to them, ship_to = destination)\` → one-time token, valid 1h. Passing \`cart\` makes Z-Zero SIGN
+   your declared intent and bind the card to it — the user gets cryptographic proof of what was authorized.
+6. \`execute_payment(token, checkout_url, actual_amount = final total)\`. ALWAYS pass actual_amount.
+   On success you get \`signed_receipt\` (+ verify_url): a signed statement of what actually settled,
+   diffed against the intent. Share verify_url with the user — prove the purchase, don't claim it.
 
 ⛔ Never call \`request_payment_token\` before BOTH: shipping submitted AND card fields + final total visible.
 
@@ -1094,7 +1314,8 @@ After \`confirmed\`/\`unconfirmed\`, prefer to visually confirm the order page w
 
 If you began PATH B (called \`get_merchant_hints\` + followed \`pre_steps\`) but cannot finish for a
 TECHNICAL reason (field not found, bot-blocked, timeout, unknown form):
-→ Call \`report_checkout_fail(url, error_type, error_message)\` before giving up (url = the page you got stuck on).
+→ Call \`report_checkout_fail(url, failure_class, step, error_message)\` before giving up (url = the page you got stuck on;
+  pick the closest \`failure_class\` from the tool's enum — use 'unknown' only as last resort).
 → Do NOT call it for user-cancelled or insufficient-balance — those are not technical failures.
 
 ### Known limitations
@@ -1175,7 +1396,7 @@ async function main() {
     await server.connect(transport);
     console.error(`🔐 Z-Zero MCP Server v${CURRENT_MCP_VERSION} running (Base + USDC, gasless via Coinbase Paymaster)...`);
     console.error("Status: Secure & Connected to Z-ZERO Gateway");
-    console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, set_api_key, show_api_key_status");
+    console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, verify_receipt, set_api_key, show_api_key_status");
 }
 
 main().catch(console.error);

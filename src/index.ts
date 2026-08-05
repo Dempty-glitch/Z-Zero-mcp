@@ -251,7 +251,7 @@ server.tool(
 server.tool(
     "request_payment_token",
     "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
-    "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for.",
+    "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for. Pass `criteria` too: the few things the owner actually cared about, which this purchase gets scored against at payment time.",
     {
         card_alias: z
             .string()
@@ -278,15 +278,37 @@ server.tool(
             .string()
             .optional()
             .describe("Shipping destination as a single string (only a hash is stored, never the raw address)."),
+        criteria: z
+            .object({
+                source: z
+                    .enum(["user_link", "user_described", "agent_chose"])
+                    .describe("Where the choice of THIS product came from. 'user_link' = they gave you the link, so the product is their pick, not yours."),
+                items: z
+                    .array(z.object({
+                        key: z.string().describe("Short name for the attribute, e.g. item_type, max_price, colour, size, ship_time."),
+                        stated: z.string().describe("What the owner said about it, in their terms."),
+                    }))
+                    .min(1)
+                    .max(12),
+            })
+            .optional()
+            .describe(
+                "RECOMMENDED. The things this purchase will be judged against later — write ONLY what the owner actually stated. " +
+                "Attributes like price, colour, size, product type or delivery time are examples of the KIND of thing that belongs here, " +
+                "not a checklist to fill: an owner who said \"a hat, $10\" gave you exactly two, and inventing three more would mark a good " +
+                "purchase as wrong. If they changed their mind, record where they LANDED, not the journey. " +
+                "This list is locked and signed now, before the outcome is known, and you will be asked to score against it at payment time."
+            ),
     },
-    async ({ card_alias, amount, merchant, cart, ship_to }) => {
-        const intentInput = (cart && cart.length) || ship_to
+    async ({ card_alias, amount, merchant, cart, ship_to, criteria }) => {
+        const intentInput = (cart && cart.length) || ship_to || criteria
             ? {
                 cart,
                 subtotal: cart?.every(i => typeof i.unit_price === "number")
                     ? Math.round(cart.reduce((s, i) => s + (i.unit_price as number) * i.qty, 0) * 100) / 100
                     : undefined,
                 ship_to,
+                criteria,
             }
             : undefined;
         const token = await issueTokenRemote(card_alias, amount, merchant, intentInput);

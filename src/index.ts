@@ -13,8 +13,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-// ── WDK Non-Custodial Backend (single backend, no custodial fallback) ─────────
-import * as activeBackend from "./wdk_backend.js";
+// ── Base backend (single backend, no custodial fallback) ─────────────────────
+import * as activeBackend from "./base_backend.js";
 
 const issueTokenRemote = activeBackend.issueTokenRemote;
 const resolveTokenRemote = activeBackend.resolveTokenRemote;
@@ -26,7 +26,7 @@ const getBalanceRemote = activeBackend.getBalanceRemote;
 const listCardsRemote = activeBackend.listCardsRemote;
 const getDepositAddressesRemote = activeBackend.getDepositAddressesRemote;
 
-console.error(`[Z-ZERO MCP] 🚀 Pure WDK Non-Custodial Mode`);
+console.error(`[Z-ZERO MCP] 🚀 Base + USDC (non-custodial, gasless)`);
 // ────────────────────────────────────────────────────────────────────────────
 
 
@@ -37,6 +37,7 @@ import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-p
 import { chromium } from "playwright";
 import { setPassportKey, getPassportKey, persistPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap + rotate-on-connect
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
+import { resolveApiBaseUrl } from "./lib/api-base.js";
 import {
     TAXONOMY_VERSION,
     FAILURE_CLASSES,
@@ -61,7 +62,7 @@ function maskKey(key: string): string {
 // labeled data even when the agent never calls report_checkout_fail.
 // ============================================================
 function emitCheckoutEvent(evt: CheckoutEvent): void {
-    const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+    const ZZERO_API = resolveApiBaseUrl();
     const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
     const body = {
         ...evt,
@@ -93,6 +94,27 @@ const server = new McpServer({
 });
 
 // ============================================================
+// SHARED: the one AUTH_REQUIRED reply
+// ============================================================
+// A 401 can mean the key is missing, mistyped, revoked, or already rotated onto
+// another machine — the server cannot tell us which, so the message must not
+// claim one of them. It also must not send the reader to a restart: set_api_key
+// activates a new key in place (since 1.5.0).
+function authRequiredResult(detail?: string) {
+    return {
+        content: [{
+            type: "text" as const,
+            text: "❌ AUTHENTICATION REQUIRED: Z-ZERO rejected your Passport Key — it is missing, invalid, or has been revoked.\n" +
+                (detail ? `Server said: ${detail}\n` : "") +
+                "\n👉 Get a fresh key: https://z-zero.xyz/dashboard/agents\n" +
+                "👉 Then call set_api_key with it — no restart needed. (Or set Z_ZERO_API_KEY in your MCP config and restart.)\n" +
+                "Note: one key belongs to one machine — it rotates on first connect, so a key already used elsewhere will not work here."
+        }],
+        isError: true,
+    };
+}
+
+// ============================================================
 // TOOL 1: List available cards (safe - no sensitive data)
 // ============================================================
 server.tool(
@@ -101,22 +123,15 @@ server.tool(
     {},
     async () => {
         const data = await listCardsRemote();
-        if (data?.error === "AUTH_REQUIRED") {
-            return {
-                content: [{
-                    type: "text" as const,
-                    text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents\n" +
-                        "👉 Then SET it as the 'Z_ZERO_API_KEY' environment variable in your AI tool (Claude Desktop/Cursor) and RESTART the tool."
-                }],
-                isError: true
-            };
-        }
+        if (data?.error === "AUTH_REQUIRED") return authRequiredResult(data.message);
         if (data?.error) {
             return {
                 content: [{
                     type: "text" as const,
-                    text: `❌ API ERROR: ${data.message || data.error}\n\nCould not fetch cards. Please verify your Passport Key is correct.`
+                    // Don't blame the key here — AUTH_REQUIRED was already handled
+                    // above, so whatever reaches this branch is something else
+                    // (redirected base URL, deactivated agent, server error).
+                    text: `❌ API ERROR: ${data.message || data.error}\n\nCould not fetch cards.`
                 }],
                 isError: true
             };
@@ -157,23 +172,17 @@ server.tool(
     },
     async ({ card_alias }) => {
         const data = await getBalanceRemote(card_alias);
-        if (data?.error === "AUTH_REQUIRED") {
-            return {
-                content: [{
-                    type: "text" as const,
-                    text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents\n" +
-                        "👉 Then SET it as the 'Z_ZERO_API_KEY' environment variable and RESTART."
-                }],
-                isError: true
-            };
-        }
+        if (data?.error === "AUTH_REQUIRED") return authRequiredResult(data.message);
         if (!data || data.error) {
+            // Pass the backend's own reason through — "card not found" was being
+            // printed over real causes (no wallet, network down, server error).
+            const reason = data?.message
+                || `Card "${card_alias}" not found. Use list_cards to see available cards.`;
             return {
                 content: [
                     {
                         type: "text" as const,
-                        text: `Card "${card_alias}" not found or API issue. Use list_cards to see available cards.`,
+                        text: reason,
                     },
                 ],
                 isError: true,
@@ -199,22 +208,12 @@ server.tool(
     {},
     async () => {
         const data = await getDepositAddressesRemote();
-        if (data?.error === "AUTH_REQUIRED") {
-            return {
-                content: [{
-                    type: "text" as const,
-                    text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents\n" +
-                        "👉 Then SET it as the 'Z_ZERO_API_KEY' environment variable and RESTART."
-                }],
-                isError: true
-            };
-        }
+        if (data?.error === "AUTH_REQUIRED") return authRequiredResult(data.message);
 
         // ── Base smart-account wallet ─────────────────────────────────────────
-        if (data?.wdk_wallet?.address) {
-            const walletAddr = data.wdk_wallet.address;
-            const balance = data.wdk_wallet.balance_usdt ?? 0;
+        if (data?.base_wallet?.address) {
+            const walletAddr = data.base_wallet.address;
+            const balance = data.base_wallet.balance_usdt ?? 0;
             return {
                 content: [{
                     type: "text" as const,
@@ -231,11 +230,14 @@ server.tool(
             };
         }
 
-        // No Base wallet connected
+        // Anything else: say what actually went wrong. Only a real NO_WALLET
+        // sends the reader to the wallet page — a network or server failure that
+        // pointed there would have them building a wallet they already have.
         return {
             content: [{
                 type: "text" as const,
-                text: "No Base wallet found. Please create one at https://z-zero.xyz/dashboard/agent-wallet",
+                text: data?.message
+                    || "No Base wallet found. Please create one at https://z-zero.xyz/dashboard/agent-wallet",
             }],
             isError: true,
         };
@@ -288,16 +290,7 @@ server.tool(
             }
             : undefined;
         const token = await issueTokenRemote(card_alias, amount, merchant, intentInput);
-        if (token?.error === "AUTH_REQUIRED") {
-            return {
-                content: [{
-                    type: "text" as const,
-                    text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents"
-                }],
-                isError: true
-            };
-        }
+        if (token?.error === "AUTH_REQUIRED") return authRequiredResult(token.message);
         if (!token || token.error) {
             // Show actual API error if available (e.g. 429 max cards, 402 insufficient)
             if (token?.message) {
@@ -310,7 +303,11 @@ server.tool(
                 };
             }
             const balanceData = await getBalanceRemote(card_alias);
-            const balance = balanceData?.balance;
+            // getBalanceRemote returns `wallet_balance` — reading `balance` here
+            // always came back undefined, so this fell through to the vague
+            // "not found / key invalid / limit exceeded" line even when the real
+            // reason was simply an empty wallet.
+            const balance = balanceData?.error ? undefined : balanceData?.wallet_balance;
             return {
                 content: [
                     {
@@ -375,7 +372,7 @@ server.tool(
             .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
     },
     async ({ domain }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+        const ZZERO_API = resolveApiBaseUrl();
         const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
         try {
             const resp = await fetch(`${ZZERO_API}/api/checkout-hints?domain=${encodeURIComponent(domain)}&fields=merchant`, {
@@ -456,16 +453,7 @@ server.tool(
 
         // Step 1: Resolve token → card data (RAM only)
         const cardData = await resolveTokenRemote(token);
-        if (cardData?.error === "AUTH_REQUIRED") {
-            return {
-                content: [{
-                    type: "text" as const,
-                    text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents"
-                }],
-                isError: true
-            };
-        }
+        if (cardData?.error === "AUTH_REQUIRED") return authRequiredResult(cardData.message);
         if (!cardData || cardData.error) {
             return {
                 content: [
@@ -638,16 +626,7 @@ server.tool(
     },
     async ({ token, reason }) => {
         const result = await cancelTokenRemote(token);
-        if (result?.error === "AUTH_REQUIRED") {
-            return {
-                content: [{
-                    type: "text" as const,
-                    text: "❌ AUTHENTICATION REQUIRED: Your Z_ZERO_API_KEY (Passport Key) is missing from the MCP configuration.\n\n" +
-                        "👉 Please GET your key here: https://z-zero.xyz/dashboard/agents"
-                }],
-                isError: true
-            };
-        }
+        if (result?.error === "AUTH_REQUIRED") return authRequiredResult(result.message);
         if (!result || !result.success) {
             return {
                 content: [
@@ -752,9 +731,9 @@ server.tool(
         }
 
         // Step 2: Validate new key against Dashboard API before swapping
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+        const ZZERO_API = resolveApiBaseUrl();
         try {
-            const resp = await fetch(`${ZZERO_API}/api/wdk/balance`, {
+            const resp = await fetch(`${ZZERO_API}/api/wallet/balance`, {
                 headers: {
                     "Authorization": `Bearer ${trimmed}`,
                     "x-mcp-version": CURRENT_MCP_VERSION,
@@ -882,7 +861,7 @@ server.tool(
             .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
     },
     async ({ checkout_url, card_alias }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+        const ZZERO_API = resolveApiBaseUrl();
         const API_KEY = getPassportKey();  // ✅ FIX: use hot-swap key store, not process.env
 
         // Spend guard for the autonomous path. auto_pay derives the amount itself
@@ -945,7 +924,7 @@ server.tool(
                     };
                 }
 
-                const resp = await fetch(`${ZZERO_API}/api/wdk/transfer`, {
+                const resp = await fetch(`${ZZERO_API}/api/wallet/transfer`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}` },
                     body: JSON.stringify({ to, amount, card_alias }),
@@ -1184,7 +1163,7 @@ server.tool(
             .describe("The receipt_id returned by execute_payment / auto_pay_checkout (signed_receipt.receipt_id)."),
     },
     async ({ receipt_id }) => {
-        const ZZERO_API = process.env.Z_ZERO_API_BASE_URL || process.env.Z_ZERO_API_BASE || "https://z-zero.xyz";
+        const ZZERO_API = resolveApiBaseUrl();
         try {
             const resp = await fetch(`${ZZERO_API}/api/receipts/${encodeURIComponent(receipt_id)}`, {
                 headers: { "x-mcp-version": CURRENT_MCP_VERSION },

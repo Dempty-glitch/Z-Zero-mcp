@@ -1,17 +1,16 @@
-// Z-ZERO WDK Backend — Non-Custodial Module
-// Drop-in replacement for api_backend.ts when Z_ZERO_WALLET_MODE=wdk
-// Exports IDENTICAL function signatures so index.ts can swap backends without any changes.
+// Z-ZERO Base Backend (formerly wdk_backend.ts — renamed in the 05/08/2026 WDK purge;
+// the Tether-WDK/Tron era it was named for is gone, this has been Base + USDC throughout).
 //
-// Key differences from custodial api_backend.ts:
-//   - getBalanceRemote() → reads stablecoin (USDC) balance on-chain on Base (not from Supabase wallets table)
-//   - getDepositAddressesRemote() → returns the Base wallet address (not HD custodial address)
-//   - issueTokenRemote() → sends USDC on Base first, THEN issues JIT card
-//   - cancelTokenRemote() → triggers on-chain USDC refund back to user's Base wallet
+//   - getBalanceRemote() → on-chain USDC balance on Base via /api/wallet/balance
+//   - getDepositAddressesRemote() → the agent's Base smart-account address
+//   - issueTokenRemote() → sends USDC on Base first, THEN issues the JIT card
+//   - cancelTokenRemote() → on-chain USDC refund back to the user's Base wallet
 
 import type { CardData, PaymentToken } from "./types.js";
 import { getPassportKey, hasPassportKey } from "./lib/key-store.js";
+import { resolveApiBaseUrl } from "./lib/api-base.js";
 
-const API_BASE_URL = process.env.Z_ZERO_API_BASE_URL || "https://z-zero.xyz";
+const API_BASE_URL = resolveApiBaseUrl();
 const INTERNAL_SECRET = process.env.Z_ZERO_INTERNAL_SECRET || "";
 
 // Injected at build time — always reflects the actual running version
@@ -42,15 +41,55 @@ async function apiRequest(endpoint: string, method: string = 'GET', body: any = 
                 "X-MCP-Version": CURRENT_MCP_VERSION,
             },
             body: body ? JSON.stringify(body) : null,
+            // Never let fetch follow a redirect while carrying the Passport Key:
+            // it would either drop the header (silent 401) or hand the key to
+            // whatever host the redirect names. Surface it instead.
+            redirect: "manual",
         });
+        if (res.status >= 300 && res.status < 400) {
+            return redirectError(url, res);
+        }
         if (!res.ok) {
             const err = await res.json().catch(() => ({ error: res.statusText }));
-            return { error: err.error || "API_ERROR", message: err.message || err.error || res.statusText };
+            return httpError(res, err);
         }
         return await res.json();
     } catch (err: any) {
         return { error: "NETWORK_ERROR", message: err.message };
     }
+}
+
+// Normalise a failed HTTP response into an error object callers can branch on.
+// A 401 becomes AUTH_REQUIRED here — at the source — so no caller can mistake a
+// rejected key for a missing resource. `status` rides along so callers can tell
+// 404 (resource genuinely absent) from 500 (server broke).
+// A redirect on an authenticated call is a configuration bug, not an auth bug.
+// Say so, because the 401 it would otherwise become reads as "your key is dead".
+function redirectError(url: string, res: Response) {
+    const target = res.headers.get("location") || "another host";
+    return {
+        error: "BASE_URL_REDIRECT",
+        status: res.status,
+        message:
+            `${url} redirected (${res.status}) to ${target}. The Passport Key was NOT forwarded — ` +
+            `a redirected request loses its Authorization header, which shows up as a false 401. ` +
+            `Set Z_ZERO_API_BASE_URL to https://z-zero.xyz in your MCP config.`,
+    };
+}
+
+function httpError(res: Response, err: any) {
+    if (res.status === 401) {
+        return {
+            error: "AUTH_REQUIRED",
+            status: 401,
+            message: err?.message || err?.error || "Passport Key is missing, invalid, or revoked.",
+        };
+    }
+    return {
+        error: err?.error || "API_ERROR",
+        status: res.status,
+        message: err?.message || err?.error || res.statusText,
+    };
 }
 
 async function internalApiRequest(endpoint: string, method: string, body: any) {
@@ -70,10 +109,17 @@ async function internalApiRequest(endpoint: string, method: string, body: any) {
                 "X-MCP-Version": CURRENT_MCP_VERSION,
             },
             body: body ? JSON.stringify(body) : null,
+            // Never let fetch follow a redirect while carrying the Passport Key:
+            // it would either drop the header (silent 401) or hand the key to
+            // whatever host the redirect names. Surface it instead.
+            redirect: "manual",
         });
+        if (res.status >= 300 && res.status < 400) {
+            return redirectError(url, res);
+        }
         if (!res.ok) {
             const err = await res.json().catch(() => ({ error: res.statusText }));
-            return { error: err.error || "API_ERROR", message: err.message || err.error || res.statusText };
+            return httpError(res, err);
         }
         return await res.json();
     } catch (err: any) {
@@ -86,9 +132,7 @@ async function internalApiRequest(endpoint: string, method: string, body: any) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function listCardsRemote(): Promise<any> {
-    // Calls /api/tokens/cards — but that route returns balance from Supabase.
-    // For WDK mode, the Dashboard API must read wallet_mode and return on-chain balance.
-    // This is handled server-side in the updated /api/tokens/cards route.
+    // /api/tokens/cards returns card aliases + the on-chain Base USDC balance.
     return await apiRequest('/api/tokens/cards', 'GET');
 }
 
@@ -96,16 +140,44 @@ export async function listCardsRemote(): Promise<any> {
 // Balance: On-chain USDC (stablecoin) on Base via Dashboard API
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Turn a failed /api/wallet/balance call into an honest, actionable failure.
+// Returns null when the call succeeded.
+//
+// Why this exists: this used to collapse EVERY error into "Base wallet not
+// connected", so a user whose Passport Key had been revoked was sent to the
+// wallet page to fix a problem that was about the key. Only a genuine 404 means
+// "no wallet" — everything else must keep its own identity.
+function walletLookupFailure(data: any) {
+    if (!data?.error) return null;
+
+    if (data.error === "AUTH_REQUIRED") {
+        return { error: "AUTH_REQUIRED", message: data.message };
+    }
+    if (data.error === "NETWORK_ERROR") {
+        return {
+            error: "NETWORK_ERROR",
+            message: `Could not reach ${API_BASE_URL}: ${data.message}`,
+        };
+    }
+    if (data.status === 404) {
+        return {
+            error: "NO_WALLET",
+            message: 'Base wallet not connected. Create one at https://z-zero.xyz/dashboard/agent-wallet',
+        };
+    }
+    return {
+        error: data.error,
+        status: data.status,
+        message: data.message || 'Could not read your Base wallet balance.',
+    };
+}
+
 export async function getBalanceRemote(cardAlias: string): Promise<any> {
     // Call Dashboard to get the agent's Base wallet balance (Dashboard resolves user from
     // passport key, finds the connected Base wallet, queries on-chain USDC balance)
-    const data = await apiRequest('/api/wdk/balance', 'GET');
-    if (data?.error) {
-        return {
-            error: true,
-            message: 'Base wallet not connected. Create one at https://z-zero.xyz/dashboard/agent-wallet'
-        };
-    }
+    const data = await apiRequest('/api/wallet/balance', 'GET');
+    const failure = walletLookupFailure(data);
+    if (failure) return failure;
 
     return {
         wallet_balance: data.base_usdc_balance ?? data.balance_usdt,
@@ -122,14 +194,10 @@ export async function getBalanceRemote(cardAlias: string): Promise<any> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function getDepositAddressesRemote(): Promise<any> {
-    const data = await apiRequest('/api/wdk/balance', 'GET');
+    const data = await apiRequest('/api/wallet/balance', 'GET');
 
-    if (data?.error) {
-        return {
-            error: true,
-            message: 'Base wallet not connected. Create one at https://z-zero.xyz/dashboard/agent-wallet'
-        };
-    }
+    const failure = walletLookupFailure(data);
+    if (failure) return failure;
 
     const balance = data.base_usdc_balance ?? data.balance_usdt;
 
@@ -139,7 +207,7 @@ export async function getDepositAddressesRemote(): Promise<any> {
             base: data.address,
             note: 'Send USDC (or any supported stablecoin) on Base to your wallet. Gasless spending via the Coinbase Paymaster.'
         },
-        wdk_wallet: {
+        base_wallet: {
             address: data.address,
             chain: data.chain || 'base',
             balance_usdt: balance
@@ -174,8 +242,7 @@ export async function issueTokenRemote(
         merchant,
         device_fingerprint: `mcp-base-${process.platform}-${process.arch}`,
         network_id: process.env.NETWORK_ID || "base-usdc",
-        session_id: `wdk-${Math.random().toString(36).substring(7)}`,
-        wallet_mode: 'wdk',  // Signals Dashboard to use on-chain payment path
+        session_id: `base-${Math.random().toString(36).substring(7)}`,
         // Primitive 1: the intent this card is derived from. Server signs it and
         // returns the signed object; older servers simply ignore this field.
         ...(intent ? { intent } : {}),
@@ -193,7 +260,7 @@ export async function issueTokenRemote(
         ttl_seconds: 3600,
         used: false,
         tx_hash: data.tx_hash,
-        mode: 'wdk_noncustodial',
+        mode: 'base_usdc',
         intent: data.intent || null,     // signed intent (intent_id, hash, signature) if server supports it
         mcp_warning: data._mcp_warning || null,  // Relay backend version warning to agent
     };
@@ -250,7 +317,6 @@ export async function burnTokenRemote(token: string, receipt_id?: string): Promi
         token,
         receipt_id,
         success: true,
-        wallet_mode: 'wdk',  // Signals Dashboard to refund underspend on-chain
     });
     return !!data && !data.error;
 }
@@ -262,7 +328,6 @@ export async function burnTokenRemote(token: string, receipt_id?: string): Promi
 export async function cancelTokenRemote(token: string): Promise<any> {
     const data = await apiRequest('/api/tokens/cancel', 'POST', {
         token,
-        wallet_mode: 'wdk',  // Triggers on-chain USDC refund
     });
     if (data?.error) return data;
     return {
@@ -279,5 +344,5 @@ export async function cancelTokenRemote(token: string): Promise<any> {
 
 export async function refundUnderspendRemote(token: string, actualSpent: number): Promise<void> {
     // console.error (NOT console.log) — stdout is the MCP stdio transport; logging there corrupts the protocol.
-    console.error(`[WDK MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
+    console.error(`[Z-ZERO MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
 }

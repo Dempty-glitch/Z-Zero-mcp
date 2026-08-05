@@ -1,6 +1,6 @@
 // key-store.ts
 // Shared, mutable in-memory store for the Passport Key (Z_ZERO_API_KEY).
-// All API backends (custodial + WDK) import getPassportKey() from here
+// All API backends import getPassportKey() from here
 // so a single set_api_key MCP tool updates the key for ALL backends at once.
 //
 // v1.5.0: keys are also persisted to ~/.z-zero/credentials (chmod 600).

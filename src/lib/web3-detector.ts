@@ -49,12 +49,12 @@ export async function detectWeb3Payment(
                     if (method === "net_version") return "8453";
                     if (method === "eth_sendTransaction") {
                         const tx = params?.[0] as Record<string, string>;
-                        (window as unknown as Record<string, unknown>)["__wdkCapturedTx"] = tx;
+                        (window as unknown as Record<string, unknown>)["__zzCapturedTx"] = tx;
                         return "0xdeadbeef00000000000000000000000000000000000000000000000000000001";
                     }
                     if (method === "wallet_switchEthereumChain") return null;
                     if (method === "eth_getBalance") return "0x0";
-                    (window as unknown as Record<string, unknown>)["__wdkUnknownMethod_" + method] = true;
+                    (window as unknown as Record<string, unknown>)["__zzUnknownMethod_" + method] = true;
                     return null;
                 },
 
@@ -146,7 +146,7 @@ export async function detectWeb3Payment(
         const start = Date.now();
         while (Date.now() - start < WEB3_DETECT_TIMEOUT_MS) {
             const tx = await page.evaluate(() => {
-                return (window as unknown as Record<string, unknown>)["__wdkCapturedTx"] ?? null;
+                return (window as unknown as Record<string, unknown>)["__zzCapturedTx"] ?? null;
             });
             if (tx) {
                 const capturedTx = tx as Record<string, string>;

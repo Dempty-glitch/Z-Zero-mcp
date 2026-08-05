@@ -25,6 +25,7 @@ const postReceiptRemote = activeBackend.postReceiptRemote;
 const getBalanceRemote = activeBackend.getBalanceRemote;
 const listCardsRemote = activeBackend.listCardsRemote;
 const getDepositAddressesRemote = activeBackend.getDepositAddressesRemote;
+const getTokenPurposeRemote = activeBackend.getTokenPurposeRemote;
 
 console.error(`[Z-ZERO MCP] 🚀 Base + USDC (non-custodial, gasless)`);
 // ────────────────────────────────────────────────────────────────────────────
@@ -428,7 +429,7 @@ server.tool(
 // ============================================================
 server.tool(
     "execute_payment",
-    "Execute a payment with a one-time token: Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, then watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
+    "Execute a payment with a one-time token. TWO CALLS: call it first WITHOUT `recheck` — nothing is charged and it hands you what the owner actually asked for, locked when the card was issued; look at the page again, then call it a second time with `recheck` to pay or to pause. Then Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, and watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
     {
         token: z
             .string()
@@ -454,8 +455,91 @@ server.tool(
             })
             .optional()
             .describe("Optional hints from get_merchant_hints — selectors and pre-steps to guide Playwright. Use when default selectors fail or for complex multi-step checkouts."),
+        recheck: z
+            .object({
+                page_shows: z
+                    .string()
+                    .min(1)
+                    .describe("What is ACTUALLY on the page in front of you right now — item, variant, quantity, final total. Describe it, do not summarise it as 'looks right'."),
+                decision: z
+                    .enum(["go", "pause"])
+                    .describe("go = pay it. pause = something is off; nothing is charged, the card is not typed in, the money stays put and you tell your owner."),
+                why: z
+                    .string()
+                    .optional()
+                    .describe("Required when you pause: what did not line up."),
+            })
+            .optional()
+            .describe("Your answer to the purpose check. Omit it on the first call — this tool will hand you the owner's locked criteria to read, then you call again with this."),
     },
-    async ({ token, checkout_url, actual_amount, hints }) => {
+    async ({ token, checkout_url, actual_amount, hints, recheck }) => {
+        // ── Purpose check: the last look before there is no way back ─────────
+        // Called with no `recheck`, this tool does not pay. It hands back the
+        // criteria the owner stated, locked at issue, and asks for an answer.
+        // The question comes from the server on purpose: an agent that quotes it
+        // from its own memory can soften it until anything matches.
+        // No browser, no PAN, nothing spent — asking is free.
+        if (!recheck) {
+            const purpose = await getTokenPurposeRemote(token);
+            if (purpose?.error === "AUTH_REQUIRED") return authRequiredResult(purpose.message);
+
+            // A dead token should say so HERE, not send the agent off to look at a
+            // page and come back for a second call that was always going to fail.
+            if (purpose?.error) {
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: JSON.stringify({
+                            success: false,
+                            status: "invalid_token",
+                            nothing_charged: true,
+                            message: purpose.message || "Token is invalid, expired, cancelled, or already used. Request a new one.",
+                        }, null, 2),
+                    }],
+                    isError: true,
+                };
+            }
+
+            const criteria = purpose?.criteria ?? null;
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: JSON.stringify({
+                        status: "purpose_check",
+                        nothing_charged: true,
+                        owner_asked_for: criteria ?? "(no criteria were recorded for this card)",
+                        authorized_amount: purpose?.authorized_amount ?? null,
+                        what_to_do:
+                            "Look at the checkout page one more time. Write down what is actually there — " +
+                            "item, variant, quantity, final total — and put it next to what the owner asked for above. " +
+                            "Then call execute_payment again with `recheck`. If they do not line up, pause: " +
+                            "nothing is charged and the money stays where it is. Catching it here costs nothing; " +
+                            "after this call it costs a card.",
+                    }, null, 2),
+                }],
+            };
+        }
+
+        if (recheck.decision === "pause") {
+            // The agent's own verdict. We do not overrule it, and we do not
+            // spend on it: the card is never typed in, the token stays alive and
+            // refundable, and the human gets told.
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: JSON.stringify({
+                        success: false,
+                        status: "paused_by_agent",
+                        nothing_charged: true,
+                        token_status: "ACTIVE",
+                        page_shows: recheck.page_shows,
+                        why: recheck.why ?? null,
+                        next: "Tell your owner what did not line up and wait. To release the hold instead, call cancel_payment_token.",
+                    }, null, 2),
+                }],
+            };
+        }
+
         // Step 0: SSRF / scheme guard BEFORE we drive a browser to this URL and inject a real PAN/CVV.
         try {
             assertSafeCheckoutUrl(checkout_url);
@@ -597,6 +681,9 @@ server.tool(
             merchant_order_id: result.receipt_id || null,
             amount_captured: actual_amount,
             card_last4: cardData.number ? cardData.number.replace(/\D/g, "").slice(-4) : undefined,
+            // The purpose record travels into the signed receipt: the owner's
+            // locked criteria and the agent's answer, sealed with the outcome.
+            recheck,
         }).catch(() => null);
 
         // Step 5: Return result (NEVER includes card numbers)

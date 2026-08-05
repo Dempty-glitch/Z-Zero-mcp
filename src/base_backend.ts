@@ -278,6 +278,8 @@ export async function postReceiptRemote(payload: {
     merchant_order_id?: string | null;
     amount_captured?: number;
     card_last4?: string;
+    /** The purpose record — signed into the receipt alongside the outcome. */
+    recheck?: { page_shows: string; decision: "go" | "pause"; why?: string };
 }): Promise<any | null> {
     const data = await apiRequest('/api/receipts', 'POST', payload);
     if (!data || data.error) return null;
@@ -287,6 +289,16 @@ export async function postReceiptRemote(payload: {
 // ──────────────────────────────────────────────────────────────────────────────
 // Resolve Token: Same as custodial (returns PAN/CVV for Playwright injection)
 // ──────────────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Purpose: the criteria this card was issued against, straight from the server.
+// Deliberately NOT part of resolve — resolve pulls a real PAN from the issuer,
+// and asking "what was this for?" must never cost a card fetch.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export async function getTokenPurposeRemote(token: string): Promise<any> {
+    return await apiRequest('/api/tokens/purpose', 'POST', { token });
+}
 
 export async function resolveTokenRemote(token: string): Promise<CardData | null> {
     const data = await internalApiRequest('/api/tokens/resolve', 'POST', { token });

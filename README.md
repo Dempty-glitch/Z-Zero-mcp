@@ -17,7 +17,7 @@ npx z-zero-mcp-server
 - ⛽ **Gasless USDC on Base** — auto-detects crypto checkout (EIP-681) and settles as a gasless USDC transfer sponsored by Coinbase Paymaster. The agent holds only USDC — no ETH, no gas UX.
 - 💳 **JIT single-use virtual cards** — amount-locked, 1-hour TTL, burned after a single use. Fiat fallback for the rest of the web.
 - 🧠 **Smart Routing + checkout intelligence** — `get_merchant_hints` serves platform-specific checkout playbooks (Shopify, Etsy, WooCommerce…).
-- ✍️ **Signed intent + signed receipt** — the card is bound to a signed statement of *what it is for*, and every confirmed purchase returns a signed receipt with a diff against that intent. The agent can **prove** a purchase instead of claiming one (`verify_receipt`, public verify page).
+- ✍️ **Linked purpose + outcome** — the server signs the criteria the agent records at issuance. Before checkout, `execute_payment` hands those criteria back and requires a second call with `go` or `pause`; a confirmed purchase seals the answer into the signed receipt. The record is inspectable without pretending the platform judged whether the agent told the truth.
 - 🔄 **Structured failure labels** — failed checkouts are labeled with a fixed 14-class `failure_class` (automatically, not only when an agent remembers to report) and stored as evidence for the merchant knowledge base. Facts are promoted into shared hints only after a later outcome or review verifies them.
 
 ---
@@ -49,14 +49,20 @@ npx z-zero-mcp-server
   │                  │                      │                      │
   │                  │ (fills shipping form, reaches payment page) │
   │                  │                      │                      │
-  │                  │ request_payment_token(amount, card_alias)   │
+  │                  │ request_payment_token(amount, cart, criteria)│
   │                  ├─────────────────────▶│                      │
   │                  │◀── temp_auth token ──┤   (1-hour TTL)       │
   │                  │                      │                      │
   │                  │ execute_payment(token, checkout_url)        │
   │                  ├─────────────────────▶│                      │
-  │                  │      Playwright auto-fills card form,       │
-  │                  │      burns token after single use 🔥        │
+  │                  │◀── purpose_check ────┤  (nothing charged)   │
+  │                  │  compare locked criteria with final page    │
+  │                  │                      │                      │
+  │                  │ execute_payment(..., recheck: go | pause)   │
+  │                  ├─────────────────────▶│                      │
+  │                  │      pause → no card is filled              │
+  │                  │      go → Playwright fills + submits,       │
+  │                  │      then burns token if confirmed 🔥       │
   │                  │◀──── ✅ success ─────┤                      │
   │ "Done! Your item │                      │                      │
   │  is ordered."    │                      │                      │
@@ -143,12 +149,12 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 | `set_api_key` | Activate a new Passport Key instantly, no restart needed |
 | `show_api_key_status` | Check if a Passport Key is currently loaded (prefix only) |
 
-### Group 2 — Manual 4-Step Payment (Active)
+### Group 2 — Manual Card Payment (Active)
 
 | Tool | Description |
 |------|-------------|
-| `request_payment_token` | Issue a JIT single-use virtual-card token for a specific amount (1hr TTL). Pass `cart` + `ship_to` and the card is bound to a **signed intent** |
-| `execute_payment` | Auto-fill checkout form using a payment token via Playwright. Returns a **signed receipt** on confirmed payments |
+| `request_payment_token` | Issue a JIT single-use virtual-card token for a specific amount (1hr TTL). Pass `cart`, `criteria`, and `ship_to` to create the signed issuance record |
+| `execute_payment` | **Two calls required:** first without `recheck` returns the locked criteria and charges nothing; second supplies `recheck: { page_shows, decision: go\|pause }`. `pause` does not fill the card; confirmed `go` returns a signed receipt |
 | `cancel_payment_token` | Cancel an unused token and refund to wallet |
 | `request_human_approval` | Pause and request human confirmation before proceeding |
 
@@ -165,9 +171,9 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 
 ---
 
-## Agent primitives (v1.7.0)
+## Agent primitives (v1.9.0)
 
-Three things an agent can do here that it cannot do with a normal virtual card.
+Four linked records and controls an agent can use here that it cannot get from a normal virtual card alone.
 
 ### 1. Signed intent — the card knows what it is for
 
@@ -179,19 +185,54 @@ request_payment_token({
   amount: 44.00,
   merchant: "etsy.com",
   cart: [{ title: "Ceramic mug — matte white", qty: 2, unit_price: 18.50 }],
-  ship_to: "12 Nguyen Hue, District 1, Ho Chi Minh City, VN"
+  ship_to: "12 Nguyen Hue, District 1, Ho Chi Minh City, VN",
+  criteria: {
+    source: "user_described",
+    items: [
+      { key: "item", stated: "two matte-white ceramic mugs" },
+      { key: "max_total", stated: "no more than $44 delivered" }
+    ]
+  }
 })
 ```
 
-Z-ZERO signs that statement (EIP-191) and binds it to the card. The user gets
-cryptographic proof of **what this card was authorized to buy** — not just how
-much it could spend. The shipping address is stored as a hash, never raw.
+Z-ZERO signs that statement (EIP-191) during issuance. It is a tamper-evident
+record of the criteria the agent supplied as the owner's instruction — not an
+independent proof that the human personally approved every line. The shipping
+address is stored as a hash, never raw.
 
 **Before you request a token, compare the checkout page with what the user actually
 asked for** — same items, same quantity, same variant, same destination. A mismatch
 you catch there costs nothing. After the token, it costs a card.
 
-### 2. Signed receipt — prove the purchase, don't claim it
+### 2. Purpose check — read first, then declare `go` or `pause`
+
+`execute_payment` is deliberately a two-call tool:
+
+```jsonc
+// Call 1 — omit recheck. No browser, PAN, or charge.
+execute_payment({ token, checkout_url, actual_amount: 44.00 })
+// → { status: "purpose_check", nothing_charged: true, owner_asked_for: ... }
+
+// Call 2 — describe the final page and make an explicit decision.
+execute_payment({
+  token,
+  checkout_url,
+  actual_amount: 44.00,
+  recheck: {
+    page_shows: "2 matte-white mugs, delivered total $44.00",
+    decision: "go"
+  }
+})
+```
+
+Use `decision: "pause"` when anything differs. The card is not filled and the
+token remains active and refundable. On `go`, the checkout runs; if the merchant
+confirms the order, the declaration is sealed into the signed receipt with the
+outcome. The platform records what the agent declared; it does not independently
+inspect the page or certify that the declaration was true.
+
+### 3. Signed receipt — prove the purchase, don't claim it
 
 On a confirmed payment you get back:
 
@@ -219,7 +260,7 @@ receipt therefore carries `provenance` per field: `zzero_issued` (the limit we s
 evidence), `agent_reported` (unverified), `human_verified`. Until the capture webhook
 lands, this is a **signed execution receipt**, not settlement proof, and it says so.
 
-### 3. Structured failure classes — every failure teaches the network
+### 4. Structured failure classes — every failure teaches the network
 
 `report_checkout_fail` takes a fixed enum, not free text:
 

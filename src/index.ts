@@ -117,13 +117,30 @@ function authRequiredResult(detail?: string) {
 }
 
 // ============================================================
+// QUY ƯỚC ANNOTATIONS (xem docs/mcp_hardening_plan_22_08_26.md §W1)
+//   openWorldHint = true  → TẠI THỜI ĐIỂM GỌI tool chạm ra ngoài control plane
+//                           Z-ZERO: merchant, issuer (Airwallex), hoặc public chain (Base).
+//   openWorldHint = false → chỉ đọc/ghi DB & API của Z-ZERO, hoặc thuần local — KỂ CẢ khi
+//                           dữ liệu có nguồn gốc issuer nhưng đã reconcile sẵn vào DB
+//                           (vì vậy verify_receipt = false).
+//   destructiveHint       → theo spec MCP là 'destructive vs additive', KHÔNG phải
+//                           'nguy hiểm' và KHÔNG phải 'không đảo ngược được'.
+//   idempotentHint        → chỉ khai khi readOnlyHint === false.
+// Annotations là HINT, không phải hàng rào bảo mật. Chống double-charge là việc của
+// idempotency_key ở backend, không phải của idempotentHint.
+// ============================================================
 // TOOL 1: List available cards (safe - no sensitive data)
 // ============================================================
 server.registerTool(
     "list_cards",
     {
+        title: "List Cards",
         description: "List all available virtual card aliases and their balances. No sensitive data is returned.",
         inputSchema: {},
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: false,
+        },
     },
     async () => {
         const data = await listCardsRemote();
@@ -169,11 +186,16 @@ server.registerTool(
 server.registerTool(
     "check_balance",
     {
+        title: "Check Balance",
         description: "Check spendable USD balance for a card alias. For active token limits, use list_cards instead.",
         inputSchema: {
             card_alias: z
                 .string()
                 .describe("The alias of the card to check, e.g. 'Card_01'"),
+        },
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: true,
         },
     },
     async ({ card_alias }) => {
@@ -211,8 +233,13 @@ server.registerTool(
 server.registerTool(
     "get_deposit_addresses",
     {
+        title: "Get Deposit Address",
         description: "Get your Base deposit address to top up your wallet with USDC (or any supported stablecoin on Base).",
         inputSchema: {},
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: true,
+        },
     },
     async () => {
         const data = await getDepositAddressesRemote();
@@ -259,6 +286,7 @@ server.registerTool(
 server.registerTool(
     "request_payment_token",
     {
+        title: "Issue JIT Card (spends $0.10 fee)",
         description: "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
         "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for. Pass `criteria` too: the few things the owner actually cared about, which this purchase gets scored against at payment time.",
         inputSchema: {
@@ -308,6 +336,12 @@ server.registerTool(
                     "purchase as wrong. If they changed their mind, record where they LANDED, not the journey. " +
                     "This list is locked and signed now, before the outcome is known, and you will be asked to score against it at payment time."
                 ),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
         },
     },
     async ({ card_alias, amount, merchant, cart, ship_to, criteria }) => {
@@ -398,11 +432,16 @@ server.registerTool(
 server.registerTool(
     "get_merchant_hints",
     {
+        title: "Merchant Checkout Hints",
         description: "Get merchant navigation flow for a domain or platform key (e.g. '_platform_etsy'). Returns pre_steps (how to navigate checkout) and platform notes. Call BEFORE starting checkout to understand the multi-step flow.",
         inputSchema: {
             domain: z
                 .string()
                 .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
+        },
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: false,
         },
     },
     async ({ domain }) => {
@@ -445,6 +484,7 @@ server.registerTool(
 server.registerTool(
     "ucp_probe_checkout",
     {
+        title: "Probe UCP Checkout (creates draft)",
         description: "UCP discovery + quote — creates an UNPAID draft checkout; no money moves; NOT a payment rail yet. Checks whether a merchant speaks UCP (Shopify-native agent commerce), lists its declared payment handlers, and — when variant_gid or query is given — creates a DRAFT checkout and returns the merchant's real quote: total_minor (wire units, 8900 = $89.00), total_major, currency, status, blockers, continue_url. NO payment happens; drafts expire server-side. Completing a UCP checkout needs Shopify Token-tier agent auth, which Z-Zero does not hold yet — to PAY, hand the buyer continue_url or use the standard execute_payment flow where permitted. Call this first on Shopify stores: their robots.txt bans scripted checkout, so the UCP lane is the sanctioned path.",
         inputSchema: {
             shop_url: z.string().url().describe("Store URL, e.g. https://meanblvd.com"),
@@ -464,6 +504,12 @@ server.registerTool(
                 phone_number: z.string().optional(),
             }).optional().describe("Shipping address — supply it to get the REAL total with market pricing + shipping."),
             buyer_email: z.string().email().optional(),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
         },
     },
     async ({ shop_url, variant_gid, query, quantity, ship_to, buyer_email }) => {
@@ -544,6 +590,7 @@ server.registerTool(
 server.registerTool(
     "execute_payment",
     {
+        title: "Execute Payment (charges the card)",
         description: "Execute a payment with a one-time token. TWO CALLS: call it first WITHOUT `recheck` — nothing is charged and it hands you what the owner actually asked for, locked when the card was issued; look at the page again, then call it a second time with `recheck` to pay or to pause. Then Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, and watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
         inputSchema: {
             token: z
@@ -586,6 +633,12 @@ server.registerTool(
                 })
                 .optional()
                 .describe("Your answer to the purpose check. Omit it on the first call — this tool will hand you the owner's locked criteria to read, then you call again with this."),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
         },
     },
     async ({ token, checkout_url, actual_amount, hints, recheck }) => {
@@ -841,6 +894,7 @@ server.registerTool(
 server.registerTool(
     "cancel_payment_token",
     {
+        title: "Cancel Token — Safe Refund",
         description: "Cancel unused token and refund instantly. Use when user cancels the purchase or to free up a card slot.",
         inputSchema: {
             token: z
@@ -849,6 +903,12 @@ server.registerTool(
             reason: z
                 .string()
                 .describe("Reason for cancellation, e.g. 'Price mismatch: checkout shows $20 but token is $15'"),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: true,
         },
     },
     async ({ token, reason }) => {
@@ -892,6 +952,7 @@ server.registerTool(
 server.registerTool(
     "request_human_approval",
     {
+        title: "Show Approval Instructions",
         description: "Pause and ask the user for approval before risky actions (price mismatch, large amount, unusual request).",
         inputSchema: {
             situation: z
@@ -908,6 +969,10 @@ server.registerTool(
                 .string()
                 .optional()
                 .describe("Alternative option if available"),
+        },
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: false,
         },
     },
     async ({ situation, current_token, recommended_action, alternative_action }) => {
@@ -944,11 +1009,18 @@ server.registerTool(
 server.registerTool(
     "set_api_key",
     {
+        title: "Change Passport Key (switches identity)",
         description: "Activate a new Passport Key instantly, no restart needed. Only call when user explicitly provides a key.",
         inputSchema: {
             api_key: z
                 .string()
                 .describe("The new Passport Key to activate. Must start with 'zk_live_' or 'zk_test_'. Get from: https://z-zero.xyz/dashboard/agents"),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: false,
         },
     },
     async ({ api_key }) => {
@@ -1060,8 +1132,13 @@ server.registerTool(
 server.registerTool(
     "show_api_key_status",
     {
+        title: "Passport Key Status",
         description: "Check if Passport Key is configured. Shows prefix only, for debugging.",
         inputSchema: {},
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: false,
+        },
     },
     async () => {
         const key = getPassportKey();
@@ -1084,6 +1161,7 @@ server.registerTool(
 server.registerTool(
     "auto_pay_checkout",
     {
+        title: "Auto-Pay Checkout (charges the card)",
         description: "⚠️ MANDATORY: Read mcp://resources/sop first. Only use on PAYMENT pages where final total is visible. Auto-detects Web3 or Fiat and completes payment. For physical goods (Shopify, Etsy), get_merchant_hints first.",
         inputSchema: {
             checkout_url: z
@@ -1093,6 +1171,12 @@ server.registerTool(
             card_alias: z
                 .string()
                 .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: false,
+            openWorldHint: true,
         },
     },
     async ({ checkout_url, card_alias }) => {
@@ -1337,6 +1421,7 @@ server.registerTool(
 server.registerTool(
     "report_checkout_fail",
     {
+        title: "Report Checkout Failure",
         description: "Report a checkout you could not complete. Pick the failure_class that best matches what you saw — this feeds Z-ZERO's self-healing loop (labeled failures become better merchant hints for the next run). If nothing fits, use 'unknown' and describe what happened in error_message.",
         inputSchema: {
             url: z
@@ -1360,6 +1445,12 @@ server.registerTool(
                 .string()
                 .optional()
                 .describe("What you already tried before giving up, e.g. 'retried with submit_selector from hints'."),
+        },
+        annotations: {
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: false,
         },
     },
     async ({ url, failure_class, step, error_message, remediation_tried }) => {
@@ -1391,6 +1482,7 @@ server.registerTool(
 server.registerTool(
     "verify_receipt",
     {
+        title: "Verify Receipt",
         description: "Check where an order ENDED UP, and prove it. Returns TWO separate axes: " +
         "`order_status` — 'completed' (bought, issuer not reported yet) · 'settled' (issuer confirmed) · 'reversed' (auth voided before clearing — the order does NOT stand) · 'partially_refunded' / 'refunded' (merchant returned money AFTER settlement — the order still happened) — " +
         "and `funds_status` — 'no_payout_due' · 'payout_pending' (money owed back but not yet confirmed on-chain) · 'returned' (confirmed on-chain). " +
@@ -1399,6 +1491,10 @@ server.registerTool(
             receipt_id: z
                 .string()
                 .describe("The receipt_id returned by execute_payment / auto_pay_checkout (signed_receipt.receipt_id)."),
+        },
+        annotations: {
+            readOnlyHint: true,
+            openWorldHint: false,
         },
     },
     async ({ receipt_id }) => {

@@ -1063,23 +1063,42 @@ server.registerTool(
             };
         }
 
-        // Step 3: Swap key in RAM (old key is soft-revoked — just forgotten)
-        const result = setPassportKey(trimmed);
-        if (!result.ok) {
-            return {
-                content: [{ type: "text" as const, text: `❌ ${result.message}` }],
-                isError: true,
-            };
-        }
-
-        // Step 4: ROTATE-ON-CONNECT (v1.5.0). The key the user just pasted has
-        // been through the LLM conversation → treat it as burned. Swap it for a
-        // fresh key that NEVER enters the chat: server → this process → disk.
+        // Step 3: ROTATE-ON-CONNECT (v1.5.0), FAIL-CLOSED (v1.11, W2a).
+        // The key the user just pasted has been through the LLM conversation →
+        // treat it as burned. Ask the server to swap it for a fresh key that
+        // NEVER enters the chat: server → this process → disk.
+        //
+        // Nothing is activated until the server has answered. Before W2a the
+        // pasted key was put in RAM first and a failed/lost rotate still returned
+        // SUCCESS — the process then ran on a key that had been in the chat while
+        // claiming it had not. Now: rotate fails → the previous key stays active
+        // and the caller gets the real error.
+        //
         // Side effect by design: connecting a second machine with a copied key
         // rotates it and disconnects the first one ("one key = one agent").
-        let rotated = false;
+        const previousHint = maskKey(getPassportKey());
+        // remote_status tells the agent what the SERVER side looks like:
+        //   UNKNOWN  — the request may have reached the server; the pasted key may
+        //              already be dead and its replacement lost with the reply.
+        //   REJECTED — the server refused the pasted key; nothing happened.
+        //   ERROR    — the server answered but could not rotate; nothing happened.
+        const failClosed = (remote: "UNKNOWN" | "REJECTED" | "ERROR", why: string, next: string) => ({
+            content: [{
+                type: "text" as const,
+                text: JSON.stringify({
+                    status: "NOT_SWITCHED",
+                    remote_status: remote,
+                    message: `❌ Key rotation did not complete: ${why}`,
+                    active_key_hint: previousHint,
+                    note: `Your previous key is still active — nothing changed. ${next}`,
+                }, null, 2),
+            }],
+            isError: true,
+        });
+
+        let rotateResp: Response;
         try {
-            const rotateResp = await fetch(`${ZZERO_API}/api/keys/rotate`, {
+            rotateResp = await fetch(`${ZZERO_API}/api/keys/rotate`, {
                 method: "POST",
                 headers: {
                     "Authorization": `Bearer ${trimmed}`,
@@ -1087,23 +1106,40 @@ server.registerTool(
                 },
                 signal: AbortSignal.timeout(8000),
             });
-            if (rotateResp.ok) {
-                const rotateData: any = await rotateResp.json();
-                const newKey = typeof rotateData?.new_key === "string" ? rotateData.new_key : "";
-                if (newKey.startsWith("zk_live_") || newKey.startsWith("zk_test_")) {
-                    // Persist FIRST, then activate — if the disk write fails we
-                    // keep using the (already-rotated) key in RAM and warn.
-                    const persisted = persistPassportKey(newKey);
-                    setPassportKey(newKey);
-                    rotated = true;
-                    if (!persisted) {
-                        console.error("[SET-KEY] ⚠️ Rotated key active in RAM but NOT persisted — re-connect with a fresh key from the dashboard after restart.");
-                    }
-                }
-            }
-            // Non-OK (404 = server not yet deployed, 429, 5xx) → keep pasted key, no rotation. Backward compatible.
-        } catch {
-            // Network error → keep pasted key. Backward compatible.
+        } catch (err: any) {
+            // The request may or may not have reached the server. If it did, the
+            // pasted key is already dead and the fresh one is lost with the reply.
+            return failClosed("UNKNOWN",
+                `could not reach the server (${err?.message || "timeout"}).`,
+                "Retry set_api_key with the same key. If the server then rejects it, the rotation went through and its reply was lost — get a fresh key from https://z-zero.xyz/dashboard/agents."
+            );
+        }
+        if (rotateResp.status === 401) {
+            return failClosed("REJECTED",
+                "the server rejected the pasted key (already rotated on another machine, or revoked).",
+                "Get a fresh key from https://z-zero.xyz/dashboard/agents."
+            );
+        }
+        if (!rotateResp.ok) {
+            return failClosed("ERROR",
+                `the server returned ${rotateResp.status}.`,
+                rotateResp.status === 429 ? "Wait a minute, then retry set_api_key with the same key." : "Retry set_api_key with the same key in a moment."
+            );
+        }
+        const rotateData: any = await rotateResp.json().catch(() => null);
+        const newKey = typeof rotateData?.new_key === "string" ? rotateData.new_key : "";
+        if (!newKey.startsWith("zk_live_") && !newKey.startsWith("zk_test_")) {
+            return failClosed("ERROR", "the server answered without a usable key.", "Retry set_api_key with the same key in a moment.");
+        }
+
+        // Step 4: Persist FIRST, then activate. Only now does the identity change.
+        const persisted = persistPassportKey(newKey);
+        const activated = setPassportKey(newKey);
+        if (!activated.ok) {
+            return failClosed("ERROR", `the fresh key could not be activated (${activated.message}).`, "Get a fresh key from https://z-zero.xyz/dashboard/agents.");
+        }
+        if (!persisted) {
+            console.error("[SET-KEY] ⚠️ Rotated key active in RAM but NOT persisted — re-connect with a fresh key from the dashboard after restart.");
         }
 
         return {
@@ -1111,15 +1147,12 @@ server.registerTool(
                 type: "text" as const,
                 text: JSON.stringify({
                     status: "SUCCESS",
-                    message: rotated
-                        ? "✅ Connected. For security, the key you pasted was immediately replaced with a fresh one stored locally (~/.z-zero/credentials) — the pasted key is now dead everywhere, including this conversation."
-                        : `✅ ${result.message}`,
+                    message: "✅ Connected. For security, the key you pasted was immediately replaced with a fresh one stored locally (~/.z-zero/credentials) — the pasted key is now dead everywhere, including this conversation.",
                     // Masked hint only — never echo a usable portion of the secret to the chat/model context.
                     active_key_hint: maskKey(getPassportKey()),
-                    rotated_on_connect: rotated,
-                    note: rotated
-                        ? "One key = one agent: connecting another agent/machine with this account's key will disconnect this one."
-                        : "All subsequent API calls will use this key. Previous key removed from this session (soft revoke).",
+                    rotated_on_connect: true,
+                    ...(persisted ? {} : { persist_warning: "The fresh key is active in memory but could not be written to ~/.z-zero/credentials — after a restart, get a fresh key from the dashboard." }),
+                    note: "One key = one agent: connecting another agent/machine with this account's key will disconnect this one.",
                 }, null, 2),
             }],
         };

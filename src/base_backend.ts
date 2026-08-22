@@ -219,6 +219,30 @@ export async function getDepositAddressesRemote(): Promise<any> {
 // Issue Token: On-chain USDC (Base) payment → JIT card
 // ──────────────────────────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────────────────────────
+// W3a — idempotency for card issuance (docs/mcp_hardening_plan_22_08_26.md).
+//
+// A retry is a NEW tool call, so a key minted inside the call would be minted
+// again and the backend would issue a second card. The key must survive across
+// calls — but only while the previous outcome is UNKNOWN (network error / 5xx:
+// the server may have issued the card and the answer got lost). Any definitive
+// answer (2xx success, 4xx rejection) clears the entry, so a genuine second
+// purchase of the same item mints a fresh key and gets a fresh card.
+// ──────────────────────────────────────────────────────────────────────────────
+const PENDING_ISSUE_TTL_MS = 10 * 60_000;   // > backend's 5-min stale-reclaim window
+const pendingIssueKeys = new Map<string, { key: string; ts: number }>();
+
+function issueFingerprint(cardAlias: string, amount: number, merchant: string): string {
+    return `${cardAlias}|${amount}|${merchant}`;
+}
+
+// UNKNOWN = the request may have reached the server and issued a card even
+// though we never saw the answer. Everything else is the server speaking.
+function issueOutcomeUnknown(data: any): boolean {
+    return data?.error === "NETWORK_ERROR" ||
+        (typeof data?.status === "number" && data.status >= 500);
+}
+
 export async function issueTokenRemote(
     cardAlias: string,
     amount: number,
@@ -236,10 +260,21 @@ export async function issueTokenRemote(
     // 3. Dashboard verifies on-chain tx, activates token
     // This is safe: if on-chain tx fails, Dashboard auto-cancels the card reservation.
 
+    // Reuse the pending key when the previous identical attempt has no known
+    // outcome; refresh its timestamp so an active retry loop keeps one key.
+    const fp = issueFingerprint(cardAlias, amount, merchant);
+    const now = Date.now();
+    for (const [k, v] of pendingIssueKeys) {
+        if (now - v.ts > PENDING_ISSUE_TTL_MS) pendingIssueKeys.delete(k);
+    }
+    const idempotencyKey = pendingIssueKeys.get(fp)?.key ?? crypto.randomUUID();
+    pendingIssueKeys.set(fp, { key: idempotencyKey, ts: now });
+
     const data = await apiRequest('/api/tokens/issue', 'POST', {
         card_alias: cardAlias,
         amount,
         merchant,
+        idempotency_key: idempotencyKey,
         device_fingerprint: `mcp-base-${process.platform}-${process.arch}`,
         network_id: process.env.NETWORK_ID || "base-usdc",
         session_id: `base-${Math.random().toString(36).substring(7)}`,
@@ -247,6 +282,10 @@ export async function issueTokenRemote(
         // returns the signed object; older servers simply ignore this field.
         ...(intent ? { intent } : {}),
     });
+
+    // Definitive answer (success OR rejection) → the next identical call is a
+    // new intent, not a retry. Unknown outcome keeps the key for the retry.
+    if (!issueOutcomeUnknown(data)) pendingIssueKeys.delete(fp);
 
     if (!data) return null;
     if (data.error) return data;

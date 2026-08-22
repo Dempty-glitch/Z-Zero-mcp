@@ -119,10 +119,12 @@ function authRequiredResult(detail?: string) {
 // ============================================================
 // TOOL 1: List available cards (safe - no sensitive data)
 // ============================================================
-server.tool(
+server.registerTool(
     "list_cards",
-    "List all available virtual card aliases and their balances. No sensitive data is returned.",
-    {},
+    {
+        description: "List all available virtual card aliases and their balances. No sensitive data is returned.",
+        inputSchema: {},
+    },
     async () => {
         const data = await listCardsRemote();
         if (data?.error === "AUTH_REQUIRED") return authRequiredResult(data.message);
@@ -164,13 +166,15 @@ server.tool(
 // ============================================================
 // TOOL 2: Check card balance (safe)
 // ============================================================
-server.tool(
+server.registerTool(
     "check_balance",
-    "Check spendable USD balance for a card alias. For active token limits, use list_cards instead.",
     {
-        card_alias: z
-            .string()
-            .describe("The alias of the card to check, e.g. 'Card_01'"),
+        description: "Check spendable USD balance for a card alias. For active token limits, use list_cards instead.",
+        inputSchema: {
+            card_alias: z
+                .string()
+                .describe("The alias of the card to check, e.g. 'Card_01'"),
+        },
     },
     async ({ card_alias }) => {
         const data = await getBalanceRemote(card_alias);
@@ -204,10 +208,12 @@ server.tool(
 // ============================================================
 // TOOL 2.5: Get deposit addresses (Phase 14 feature)
 // ============================================================
-server.tool(
+server.registerTool(
     "get_deposit_addresses",
-    "Get your Base deposit address to top up your wallet with USDC (or any supported stablecoin on Base).",
-    {},
+    {
+        description: "Get your Base deposit address to top up your wallet with USDC (or any supported stablecoin on Base).",
+        inputSchema: {},
+    },
     async () => {
         const data = await getDepositAddressesRemote();
         if (data?.error === "AUTH_REQUIRED") return authRequiredResult(data.message);
@@ -250,57 +256,59 @@ server.tool(
 // ============================================================
 // TOOL 3: Request a temporary payment token (issues secure JIT card)
 // ============================================================
-server.tool(
+server.registerTool(
     "request_payment_token",
-    "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
-    "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for. Pass `criteria` too: the few things the owner actually cared about, which this purchase gets scored against at payment time.",
     {
-        card_alias: z
-            .string()
-            .describe("Which card to charge, e.g. 'Card_01'"),
-        amount: z
-            .number()
-            .min(1, "Minimum amount is $1.00")
-            .max(100, "Maximum amount is $100.00")
-            .describe("Amount in USD to authorize (min: $1, max: $100)"),
-        merchant: z
-            .string()
-            .describe("Name or URL of the merchant/service being purchased"),
-        cart: z
-            .array(z.object({
-                title: z.string().describe("Item name as shown on the checkout page"),
-                qty: z.number().describe("Quantity"),
-                unit_price: z.number().optional().describe("Unit price if visible"),
-                url: z.string().optional().describe("Product URL if known"),
-            }))
-            .max(50)
-            .optional()
-            .describe("RECOMMENDED: the items you are buying, as the USER agreed to them. This becomes a signed intent bound to the card — proof of what was authorized."),
-        ship_to: z
-            .string()
-            .optional()
-            .describe("Shipping destination as a single string (only a hash is stored, never the raw address)."),
-        criteria: z
-            .object({
-                source: z
-                    .enum(["user_link", "user_described", "agent_chose"])
-                    .describe("Where the choice of THIS product came from. 'user_link' = they gave you the link, so the product is their pick, not yours."),
-                items: z
-                    .array(z.object({
-                        key: z.string().describe("Short name for the attribute, e.g. item_type, max_price, colour, size, ship_time."),
-                        stated: z.string().describe("What the owner said about it, in their terms."),
-                    }))
-                    .min(1)
-                    .max(12),
-            })
-            .optional()
-            .describe(
-                "RECOMMENDED. The things this purchase will be judged against later — write ONLY what the owner actually stated. " +
-                "Attributes like price, colour, size, product type or delivery time are examples of the KIND of thing that belongs here, " +
-                "not a checklist to fill: an owner who said \"a hat, $10\" gave you exactly two, and inventing three more would mark a good " +
-                "purchase as wrong. If they changed their mind, record where they LANDED, not the journey. " +
-                "This list is locked and signed now, before the outcome is known, and you will be asked to score against it at payment time."
-            ),
+        description: "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
+        "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for. Pass `criteria` too: the few things the owner actually cared about, which this purchase gets scored against at payment time.",
+        inputSchema: {
+            card_alias: z
+                .string()
+                .describe("Which card to charge, e.g. 'Card_01'"),
+            amount: z
+                .number()
+                .min(1, "Minimum amount is $1.00")
+                .max(100, "Maximum amount is $100.00")
+                .describe("Amount in USD to authorize (min: $1, max: $100)"),
+            merchant: z
+                .string()
+                .describe("Name or URL of the merchant/service being purchased"),
+            cart: z
+                .array(z.object({
+                    title: z.string().describe("Item name as shown on the checkout page"),
+                    qty: z.number().describe("Quantity"),
+                    unit_price: z.number().optional().describe("Unit price if visible"),
+                    url: z.string().optional().describe("Product URL if known"),
+                }))
+                .max(50)
+                .optional()
+                .describe("RECOMMENDED: the items you are buying, as the USER agreed to them. This becomes a signed intent bound to the card — proof of what was authorized."),
+            ship_to: z
+                .string()
+                .optional()
+                .describe("Shipping destination as a single string (only a hash is stored, never the raw address)."),
+            criteria: z
+                .object({
+                    source: z
+                        .enum(["user_link", "user_described", "agent_chose"])
+                        .describe("Where the choice of THIS product came from. 'user_link' = they gave you the link, so the product is their pick, not yours."),
+                    items: z
+                        .array(z.object({
+                            key: z.string().describe("Short name for the attribute, e.g. item_type, max_price, colour, size, ship_time."),
+                            stated: z.string().describe("What the owner said about it, in their terms."),
+                        }))
+                        .min(1)
+                        .max(12),
+                })
+                .optional()
+                .describe(
+                    "RECOMMENDED. The things this purchase will be judged against later — write ONLY what the owner actually stated. " +
+                    "Attributes like price, colour, size, product type or delivery time are examples of the KIND of thing that belongs here, " +
+                    "not a checklist to fill: an owner who said \"a hat, $10\" gave you exactly two, and inventing three more would mark a good " +
+                    "purchase as wrong. If they changed their mind, record where they LANDED, not the journey. " +
+                    "This list is locked and signed now, before the outcome is known, and you will be asked to score against it at payment time."
+                ),
+        },
     },
     async ({ card_alias, amount, merchant, cart, ship_to, criteria }) => {
         const intentInput = (cart && cart.length) || ship_to || criteria
@@ -387,13 +395,15 @@ server.tool(
 // Agent MUST call this before execute_payment if unsure about a checkout page.
 // Returns domain-specific selectors and pre-steps from Z-ZERO cloud DB.
 // ============================================================
-server.tool(
+server.registerTool(
     "get_merchant_hints",
-    "Get merchant navigation flow for a domain or platform key (e.g. '_platform_etsy'). Returns pre_steps (how to navigate checkout) and platform notes. Call BEFORE starting checkout to understand the multi-step flow.",
     {
-        domain: z
-            .string()
-            .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
+        description: "Get merchant navigation flow for a domain or platform key (e.g. '_platform_etsy'). Returns pre_steps (how to navigate checkout) and platform notes. Call BEFORE starting checkout to understand the multi-step flow.",
+        inputSchema: {
+            domain: z
+                .string()
+                .describe("The main domain of the checkout page, e.g. 'amazon.com' or 'shopify.com'. Strip 'www.' prefix."),
+        },
     },
     async ({ domain }) => {
         const ZZERO_API = resolveApiBaseUrl();
@@ -432,27 +442,29 @@ server.tool(
 // UCP lane and returns a REAL merchant quote without any browser
 // and without touching money.
 // ============================================================
-server.tool(
+server.registerTool(
     "ucp_probe_checkout",
-    "UCP discovery + quote — creates an UNPAID draft checkout; no money moves; NOT a payment rail yet. Checks whether a merchant speaks UCP (Shopify-native agent commerce), lists its declared payment handlers, and — when variant_gid or query is given — creates a DRAFT checkout and returns the merchant's real quote: total_minor (wire units, 8900 = $89.00), total_major, currency, status, blockers, continue_url. NO payment happens; drafts expire server-side. Completing a UCP checkout needs Shopify Token-tier agent auth, which Z-Zero does not hold yet — to PAY, hand the buyer continue_url or use the standard execute_payment flow where permitted. Call this first on Shopify stores: their robots.txt bans scripted checkout, so the UCP lane is the sanctioned path.",
     {
-        shop_url: z.string().url().describe("Store URL, e.g. https://meanblvd.com"),
-        variant_gid: z.string().optional()
-            .describe("Exact Shopify variant GID to quote, e.g. gid://shopify/ProductVariant/123"),
-        query: z.string().optional()
-            .describe("Product search query when variant_gid is unknown — first in-stock hit is quoted."),
-        quantity: z.number().int().min(1).max(10).default(1),
-        ship_to: z.object({
-            first_name: z.string().optional(),
-            last_name: z.string().optional(),
-            street_address: z.string(),
-            address_locality: z.string().describe("City"),
-            address_region: z.string().optional().describe("State/province code, required for US/CA"),
-            address_country: z.string().describe("ISO 3166-1 alpha-2, e.g. US"),
-            postal_code: z.string(),
-            phone_number: z.string().optional(),
-        }).optional().describe("Shipping address — supply it to get the REAL total with market pricing + shipping."),
-        buyer_email: z.string().email().optional(),
+        description: "UCP discovery + quote — creates an UNPAID draft checkout; no money moves; NOT a payment rail yet. Checks whether a merchant speaks UCP (Shopify-native agent commerce), lists its declared payment handlers, and — when variant_gid or query is given — creates a DRAFT checkout and returns the merchant's real quote: total_minor (wire units, 8900 = $89.00), total_major, currency, status, blockers, continue_url. NO payment happens; drafts expire server-side. Completing a UCP checkout needs Shopify Token-tier agent auth, which Z-Zero does not hold yet — to PAY, hand the buyer continue_url or use the standard execute_payment flow where permitted. Call this first on Shopify stores: their robots.txt bans scripted checkout, so the UCP lane is the sanctioned path.",
+        inputSchema: {
+            shop_url: z.string().url().describe("Store URL, e.g. https://meanblvd.com"),
+            variant_gid: z.string().optional()
+                .describe("Exact Shopify variant GID to quote, e.g. gid://shopify/ProductVariant/123"),
+            query: z.string().optional()
+                .describe("Product search query when variant_gid is unknown — first in-stock hit is quoted."),
+            quantity: z.number().int().min(1).max(10).default(1),
+            ship_to: z.object({
+                first_name: z.string().optional(),
+                last_name: z.string().optional(),
+                street_address: z.string(),
+                address_locality: z.string().describe("City"),
+                address_region: z.string().optional().describe("State/province code, required for US/CA"),
+                address_country: z.string().describe("ISO 3166-1 alpha-2, e.g. US"),
+                postal_code: z.string(),
+                phone_number: z.string().optional(),
+            }).optional().describe("Shipping address — supply it to get the REAL total with market pricing + shipping."),
+            buyer_email: z.string().email().optional(),
+        },
     },
     async ({ shop_url, variant_gid, query, quantity, ship_to, buyer_email }) => {
         const reply = (data: unknown, isError = false) => ({
@@ -529,50 +541,52 @@ server.tool(
 // ============================================================
 // TOOL 4b: Execute payment (The "Invisible Hand")
 // ============================================================
-server.tool(
+server.registerTool(
     "execute_payment",
-    "Execute a payment with a one-time token. TWO CALLS: call it first WITHOUT `recheck` — nothing is charged and it hands you what the owner actually asked for, locked when the card was issued; look at the page again, then call it a second time with `recheck` to pay or to pause. Then Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, and watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
     {
-        token: z
-            .string()
-            .describe("The temporary payment token from request_payment_token"),
-        checkout_url: z
-            .string()
-            .url()
-            .describe("The full URL of the checkout/payment page"),
-        actual_amount: z
-            .number()
-            .optional()
-            .describe("STRONGLY RECOMMENDED. The final total shown on the checkout page (incl. shipping + tax). Enables the overcharge block and the underspend refund — omit only if it is genuinely unreadable."),
-        hints: z
-            .object({
-                pre_steps: z.array(z.string()).optional(),
-                card_selector: z.string().optional(),
-                exp_selector: z.string().optional(),
-                exp_month_selector: z.string().optional(),
-                exp_year_selector: z.string().optional(),
-                cvv_selector: z.string().optional(),
-                name_selector: z.string().optional(),
-                submit_selector: z.string().optional(),
-            })
-            .optional()
-            .describe("Optional hints from get_merchant_hints — selectors and pre-steps to guide Playwright. Use when default selectors fail or for complex multi-step checkouts."),
-        recheck: z
-            .object({
-                page_shows: z
-                    .string()
-                    .min(1)
-                    .describe("What is ACTUALLY on the page in front of you right now — item, variant, quantity, final total. Describe it, do not summarise it as 'looks right'."),
-                decision: z
-                    .enum(["go", "pause"])
-                    .describe("go = pay it. pause = something is off; nothing is charged, the card is not typed in, the money stays put and you tell your owner."),
-                why: z
-                    .string()
-                    .optional()
-                    .describe("Required when you pause: what did not line up."),
-            })
-            .optional()
-            .describe("Your answer to the purpose check. Omit it on the first call — this tool will hand you the owner's locked criteria to read, then you call again with this."),
+        description: "Execute a payment with a one-time token. TWO CALLS: call it first WITHOUT `recheck` — nothing is charged and it hands you what the owner actually asked for, locked when the card was issued; look at the page again, then call it a second time with `recheck` to pay or to pause. Then Z-Zero opens a headless browser, injects the card (you NEVER see the PAN), clicks Pay, and watches for a REAL confirmation before reporting success. Returns a `status`: `confirmed` (order placed → token burned, receipt_id may hold a real order #), `declined` (merchant rejected → token kept for refund), `unconfirmed` (submitted but no confirmation seen → do NOT retry blindly, verify first), `not_submitted` (no Pay button → supply a submit_selector hint), or `no_fields`. ALWAYS pass actual_amount so overcharges are blocked and underspend refunded.",
+        inputSchema: {
+            token: z
+                .string()
+                .describe("The temporary payment token from request_payment_token"),
+            checkout_url: z
+                .string()
+                .url()
+                .describe("The full URL of the checkout/payment page"),
+            actual_amount: z
+                .number()
+                .optional()
+                .describe("STRONGLY RECOMMENDED. The final total shown on the checkout page (incl. shipping + tax). Enables the overcharge block and the underspend refund — omit only if it is genuinely unreadable."),
+            hints: z
+                .object({
+                    pre_steps: z.array(z.string()).optional(),
+                    card_selector: z.string().optional(),
+                    exp_selector: z.string().optional(),
+                    exp_month_selector: z.string().optional(),
+                    exp_year_selector: z.string().optional(),
+                    cvv_selector: z.string().optional(),
+                    name_selector: z.string().optional(),
+                    submit_selector: z.string().optional(),
+                })
+                .optional()
+                .describe("Optional hints from get_merchant_hints — selectors and pre-steps to guide Playwright. Use when default selectors fail or for complex multi-step checkouts."),
+            recheck: z
+                .object({
+                    page_shows: z
+                        .string()
+                        .min(1)
+                        .describe("What is ACTUALLY on the page in front of you right now — item, variant, quantity, final total. Describe it, do not summarise it as 'looks right'."),
+                    decision: z
+                        .enum(["go", "pause"])
+                        .describe("go = pay it. pause = something is off; nothing is charged, the card is not typed in, the money stays put and you tell your owner."),
+                    why: z
+                        .string()
+                        .optional()
+                        .describe("Required when you pause: what did not line up."),
+                })
+                .optional()
+                .describe("Your answer to the purpose check. Omit it on the first call — this tool will hand you the owner's locked criteria to read, then you call again with this."),
+        },
     },
     async ({ token, checkout_url, actual_amount, hints, recheck }) => {
         // ── Purpose check: the last look before there is no way back ─────────
@@ -824,16 +838,18 @@ server.tool(
 // ============================================================
 // TOOL 5: Cancel payment token (returns funds to wallet)
 // ============================================================
-server.tool(
+server.registerTool(
     "cancel_payment_token",
-    "Cancel unused token and refund instantly. Use when user cancels the purchase or to free up a card slot.",
     {
-        token: z
-            .string()
-            .describe("The payment token to cancel"),
-        reason: z
-            .string()
-            .describe("Reason for cancellation, e.g. 'Price mismatch: checkout shows $20 but token is $15'"),
+        description: "Cancel unused token and refund instantly. Use when user cancels the purchase or to free up a card slot.",
+        inputSchema: {
+            token: z
+                .string()
+                .describe("The payment token to cancel"),
+            reason: z
+                .string()
+                .describe("Reason for cancellation, e.g. 'Price mismatch: checkout shows $20 but token is $15'"),
+        },
     },
     async ({ token, reason }) => {
         const result = await cancelTokenRemote(token);
@@ -873,24 +889,26 @@ server.tool(
 // ============================================================
 // TOOL 6: Request human approval (Human-in-the-loop)
 // ============================================================
-server.tool(
+server.registerTool(
     "request_human_approval",
-    "Pause and ask the user for approval before risky actions (price mismatch, large amount, unusual request).",
     {
-        situation: z
-            .string()
-            .describe("Clear description of what the bot found, e.g. 'Checkout shows $20 total (includes $3 tax) but current token is only $15'"),
-        current_token: z
-            .string()
-            .optional()
-            .describe("Current active token ID if any"),
-        recommended_action: z
-            .string()
-            .describe("What the bot recommends doing, e.g. 'Cancel current $15 token and issue a new $20 token'"),
-        alternative_action: z
-            .string()
-            .optional()
-            .describe("Alternative option if available"),
+        description: "Pause and ask the user for approval before risky actions (price mismatch, large amount, unusual request).",
+        inputSchema: {
+            situation: z
+                .string()
+                .describe("Clear description of what the bot found, e.g. 'Checkout shows $20 total (includes $3 tax) but current token is only $15'"),
+            current_token: z
+                .string()
+                .optional()
+                .describe("Current active token ID if any"),
+            recommended_action: z
+                .string()
+                .describe("What the bot recommends doing, e.g. 'Cancel current $15 token and issue a new $20 token'"),
+            alternative_action: z
+                .string()
+                .optional()
+                .describe("Alternative option if available"),
+        },
     },
     async ({ situation, current_token, recommended_action, alternative_action }) => {
         // This tool surfaces the situation to the human operator via the MCP interface.
@@ -923,13 +941,15 @@ server.tool(
 // ============================================================
 // TOOL 6.5: Set API Key (Hot-Swap Passport Key — NO restart needed)
 // ============================================================
-server.tool(
+server.registerTool(
     "set_api_key",
-    "Activate a new Passport Key instantly, no restart needed. Only call when user explicitly provides a key.",
     {
-        api_key: z
-            .string()
-            .describe("The new Passport Key to activate. Must start with 'zk_live_' or 'zk_test_'. Get from: https://z-zero.xyz/dashboard/agents"),
+        description: "Activate a new Passport Key instantly, no restart needed. Only call when user explicitly provides a key.",
+        inputSchema: {
+            api_key: z
+                .string()
+                .describe("The new Passport Key to activate. Must start with 'zk_live_' or 'zk_test_'. Get from: https://z-zero.xyz/dashboard/agents"),
+        },
     },
     async ({ api_key }) => {
         // Step 1: Format validation
@@ -1037,10 +1057,12 @@ server.tool(
 // ============================================================
 // TOOL 6.6: Show current API Key status (for debugging)
 // ============================================================
-server.tool(
+server.registerTool(
     "show_api_key_status",
-    "Check if Passport Key is configured. Shows prefix only, for debugging.",
-    {},
+    {
+        description: "Check if Passport Key is configured. Shows prefix only, for debugging.",
+        inputSchema: {},
+    },
     async () => {
         const key = getPassportKey();
         const hasKey = key.length > 0;
@@ -1059,17 +1081,19 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "auto_pay_checkout",
-    "⚠️ MANDATORY: Read mcp://resources/sop first. Only use on PAYMENT pages where final total is visible. Auto-detects Web3 or Fiat and completes payment. For physical goods (Shopify, Etsy), get_merchant_hints first.",
     {
-        checkout_url: z
-            .string()
-            .url()
-            .describe("Full URL of the checkout/payment page to analyze and pay."),
-        card_alias: z
-            .string()
-            .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
+        description: "⚠️ MANDATORY: Read mcp://resources/sop first. Only use on PAYMENT pages where final total is visible. Auto-detects Web3 or Fiat and completes payment. For physical goods (Shopify, Etsy), get_merchant_hints first.",
+        inputSchema: {
+            checkout_url: z
+                .string()
+                .url()
+                .describe("Full URL of the checkout/payment page to analyze and pay."),
+            card_alias: z
+                .string()
+                .describe("Card alias to charge for JIT Fiat fallback, e.g. 'Card_01'."),
+        },
     },
     async ({ checkout_url, card_alias }) => {
         const ZZERO_API = resolveApiBaseUrl();
@@ -1310,31 +1334,33 @@ server.tool(
 // Triggers: stuck mid pre_steps, bot blocked, selector not found, etc.
 // Does NOT apply to: user cancelled, insufficient balance, price mismatch.
 // ============================================================
-server.tool(
+server.registerTool(
     "report_checkout_fail",
-    "Report a checkout you could not complete. Pick the failure_class that best matches what you saw — this feeds Z-ZERO's self-healing loop (labeled failures become better merchant hints for the next run). If nothing fits, use 'unknown' and describe what happened in error_message.",
     {
-        url: z
-            .string()
-            .url()
-            .describe("The checkout/payment page URL where the purchase failed."),
-        failure_class: z
-            .enum(FAILURE_CLASSES)
-            .describe(
-                "Fixed failure class: 'card_declined_issuer' (card rejected by bank), 'card_declined_bin_block' (merchant refuses prepaid/virtual cards), 'avs_mismatch' (billing address rejected), '3ds_required' (extra verification/SCA screen appeared), 'bot_detected' (CAPTCHA/Cloudflare/'unusual activity'), 'form_changed' (expected field or button not found), 'price_changed' (total differs from expected), 'out_of_stock', 'shipping_unsupported' (cannot ship to address), 'login_required' (checkout demands an account), 'timeout', 'outcome_unconfirmed' (submitted but no confirmation seen), or 'unknown'."
-            ),
-        step: z
-            .enum(CHECKOUT_STEPS)
-            .optional()
-            .describe("Where it failed: 'navigate' (page load), 'pre_steps' (shipping/navigation steps), 'fill_form' (card fields), 'submit' (Pay button), 'confirm' (after submitting)."),
-        error_message: z
-            .string()
-            .optional()
-            .describe("Brief description of what you saw, e.g. 'Card number field is inside a new iframe' or 'Page redirected to CAPTCHA'. NEVER include card numbers."),
-        remediation_tried: z
-            .string()
-            .optional()
-            .describe("What you already tried before giving up, e.g. 'retried with submit_selector from hints'."),
+        description: "Report a checkout you could not complete. Pick the failure_class that best matches what you saw — this feeds Z-ZERO's self-healing loop (labeled failures become better merchant hints for the next run). If nothing fits, use 'unknown' and describe what happened in error_message.",
+        inputSchema: {
+            url: z
+                .string()
+                .url()
+                .describe("The checkout/payment page URL where the purchase failed."),
+            failure_class: z
+                .enum(FAILURE_CLASSES)
+                .describe(
+                    "Fixed failure class: 'card_declined_issuer' (card rejected by bank), 'card_declined_bin_block' (merchant refuses prepaid/virtual cards), 'avs_mismatch' (billing address rejected), '3ds_required' (extra verification/SCA screen appeared), 'bot_detected' (CAPTCHA/Cloudflare/'unusual activity'), 'form_changed' (expected field or button not found), 'price_changed' (total differs from expected), 'out_of_stock', 'shipping_unsupported' (cannot ship to address), 'login_required' (checkout demands an account), 'timeout', 'outcome_unconfirmed' (submitted but no confirmation seen), or 'unknown'."
+                ),
+            step: z
+                .enum(CHECKOUT_STEPS)
+                .optional()
+                .describe("Where it failed: 'navigate' (page load), 'pre_steps' (shipping/navigation steps), 'fill_form' (card fields), 'submit' (Pay button), 'confirm' (after submitting)."),
+            error_message: z
+                .string()
+                .optional()
+                .describe("Brief description of what you saw, e.g. 'Card number field is inside a new iframe' or 'Page redirected to CAPTCHA'. NEVER include card numbers."),
+            remediation_tried: z
+                .string()
+                .optional()
+                .describe("What you already tried before giving up, e.g. 'retried with submit_selector from hints'."),
+        },
     },
     async ({ url, failure_class, step, error_message, remediation_tried }) => {
         emitCheckoutEvent({
@@ -1362,16 +1388,18 @@ server.tool(
 // Lets the agent PROVE a purchase happened instead of claiming it.
 // Public endpoint — anyone with the receipt_id can verify.
 // ============================================================
-server.tool(
+server.registerTool(
     "verify_receipt",
-    "Check where an order ENDED UP, and prove it. Returns TWO separate axes: " +
-    "`order_status` — 'completed' (bought, issuer not reported yet) · 'settled' (issuer confirmed) · 'reversed' (auth voided before clearing — the order does NOT stand) · 'partially_refunded' / 'refunded' (merchant returned money AFTER settlement — the order still happened) — " +
-    "and `funds_status` — 'no_payout_due' · 'payout_pending' (money owed back but not yet confirmed on-chain) · 'returned' (confirmed on-chain). " +
-    "Read BOTH before speaking: 'reversed' or 'refunded' with funds 'payout_pending' means the buyer has NOT got the money back yet — never say they have. If you told the user a purchase was done and a later check returns 'reversed', tell them unprompted.",
     {
-        receipt_id: z
-            .string()
-            .describe("The receipt_id returned by execute_payment / auto_pay_checkout (signed_receipt.receipt_id)."),
+        description: "Check where an order ENDED UP, and prove it. Returns TWO separate axes: " +
+        "`order_status` — 'completed' (bought, issuer not reported yet) · 'settled' (issuer confirmed) · 'reversed' (auth voided before clearing — the order does NOT stand) · 'partially_refunded' / 'refunded' (merchant returned money AFTER settlement — the order still happened) — " +
+        "and `funds_status` — 'no_payout_due' · 'payout_pending' (money owed back but not yet confirmed on-chain) · 'returned' (confirmed on-chain). " +
+        "Read BOTH before speaking: 'reversed' or 'refunded' with funds 'payout_pending' means the buyer has NOT got the money back yet — never say they have. If you told the user a purchase was done and a later check returns 'reversed', tell them unprompted.",
+        inputSchema: {
+            receipt_id: z
+                .string()
+                .describe("The receipt_id returned by execute_payment / auto_pay_checkout (signed_receipt.receipt_id)."),
+        },
     },
     async ({ receipt_id }) => {
         const ZZERO_API = resolveApiBaseUrl();

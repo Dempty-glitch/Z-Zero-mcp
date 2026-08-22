@@ -32,6 +32,7 @@ console.error(`[Z-ZERO MCP] 🚀 Base + USDC (non-custodial, gasless)`);
 
 
 import { fillCheckoutForm } from "./playwright_bridge.js";
+import { ucpDiscover, UcpMcpClient, ucpCreateCheckout, type UcpAddress } from "./ucp_bridge.js";
 import type { CheckoutHints } from "./types.js";
 import { detectWeb3Payment } from "./lib/web3-detector.js";
 import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-price.js";
@@ -420,6 +421,107 @@ server.tool(
                     message: `Could not reach hints API: ${err?.message || "unknown error"}. Proceed with default Playwright selectors.`,
                 }, null, 2) }],
             };
+        }
+    }
+);
+
+// ============================================================
+// TOOL 3c: UCP probe — the "Official Rail" scout (creates drafts, no money moves)
+// Shopify now ships UCP natively on every store and its robots
+// policy bans browser-automation checkout. This tool checks the
+// UCP lane and returns a REAL merchant quote without any browser
+// and without touching money.
+// ============================================================
+server.tool(
+    "ucp_probe_checkout",
+    "UCP discovery + quote — creates an UNPAID draft checkout; no money moves; NOT a payment rail yet. Checks whether a merchant speaks UCP (Shopify-native agent commerce), lists its declared payment handlers, and — when variant_gid or query is given — creates a DRAFT checkout and returns the merchant's real quote: total_minor (wire units, 8900 = $89.00), total_major, currency, status, blockers, continue_url. NO payment happens; drafts expire server-side. Completing a UCP checkout needs Shopify Token-tier agent auth, which Z-Zero does not hold yet — to PAY, hand the buyer continue_url or use the standard execute_payment flow where permitted. Call this first on Shopify stores: their robots.txt bans scripted checkout, so the UCP lane is the sanctioned path.",
+    {
+        shop_url: z.string().url().describe("Store URL, e.g. https://meanblvd.com"),
+        variant_gid: z.string().optional()
+            .describe("Exact Shopify variant GID to quote, e.g. gid://shopify/ProductVariant/123"),
+        query: z.string().optional()
+            .describe("Product search query when variant_gid is unknown — first in-stock hit is quoted."),
+        quantity: z.number().int().min(1).max(10).default(1),
+        ship_to: z.object({
+            first_name: z.string().optional(),
+            last_name: z.string().optional(),
+            street_address: z.string(),
+            address_locality: z.string().describe("City"),
+            address_region: z.string().optional().describe("State/province code, required for US/CA"),
+            address_country: z.string().describe("ISO 3166-1 alpha-2, e.g. US"),
+            postal_code: z.string(),
+            phone_number: z.string().optional(),
+        }).optional().describe("Shipping address — supply it to get the REAL total with market pricing + shipping."),
+        buyer_email: z.string().email().optional(),
+    },
+    async ({ shop_url, variant_gid, query, quantity, ship_to, buyer_email }) => {
+        const reply = (data: unknown, isError = false) => ({
+            content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+            ...(isError ? { isError: true } : {}),
+        });
+        try {
+            assertSafeCheckoutUrl(shop_url);
+            const disc = await ucpDiscover(shop_url);
+            if (!disc) {
+                return reply({
+                    ucp_available: false,
+                    message: "Merchant does not expose /.well-known/ucp — use the standard get_merchant_hints + execute_payment flow instead.",
+                });
+            }
+            const base = {
+                ucp_available: true,
+                ucp_version: disc.version,
+                mcp_endpoint: disc.mcpEndpoint,
+                payment_handlers: disc.handlers.map((h) => h.handler_name),
+                card_lane: disc.cardHandler
+                    ? { handler_id: disc.cardHandler.id, config: disc.cardHandler.config }
+                    : null,
+                note: disc.cardHandler
+                    ? "dev.shopify.card is declared: this store ACCEPTS card instruments over UCP. Quote/cart/checkout work anonymously; complete_checkout requires Shopify Token-tier auth, which this server does not hold — so today the UCP lane gives you discovery + draft + continue_url, not completion."
+                    : "No card handler declared — card payment not possible on the UCP lane here.",
+            };
+            if (!variant_gid && !query) return reply(base);
+
+            const client = new UcpMcpClient(disc.mcpEndpoint);
+            let itemIds: string[] = [];
+            if (variant_gid) {
+                itemIds = [variant_gid];
+            } else {
+                const search = await client.callTool("search_catalog", { meta: {}, catalog: { query, limit: 5 } });
+                const blob = JSON.stringify(search);
+                itemIds = [...new Set(
+                    (blob.match(/gid:\\?\/\\?\/shopify\/ProductVariant\/\d+/g) ?? []).map((s) => s.replace(/\\\//g, "/"))
+                )].slice(0, 4);
+                if (itemIds.length === 0) return reply({ ...base, quote: null, message: "No variants found for that query." });
+            }
+
+            const email = buyer_email ?? "agent@z-zero.xyz";
+            let lastQuote: any = null;
+            for (const itemId of itemIds) {
+                const q = await ucpCreateCheckout(
+                    client,
+                    [{ item_id: itemId, quantity }],
+                    { email },
+                    ship_to as UcpAddress | undefined
+                );
+                const rawCheckout = (q.raw as any)?.checkout ?? q.raw ?? {};
+                lastQuote = {
+                    variant: itemId,
+                    title: rawCheckout?.line_items?.[0]?.item?.title ?? null,
+                    checkout_id: q.checkout_id || null,
+                    status: q.status,
+                    total_minor: q.total_minor,
+                    total_major: q.total_major,
+                    currency: q.currency,
+                    messages: q.messages,
+                    continue_url: q.continue_url,
+                };
+                const soldOut = !q.checkout_id || q.messages.some((m) => /out_of_stock|item_unavailable/i.test(m));
+                if (!soldOut) break;
+            }
+            return reply({ ...base, quote: lastQuote });
+        } catch (err: any) {
+            return reply({ ucp_available: null, error: err?.message ?? String(err) }, true);
         }
     }
 );
@@ -1507,7 +1609,7 @@ async function main() {
     await server.connect(transport);
     console.error(`🔐 Z-Zero MCP Server v${CURRENT_MCP_VERSION} running (Base + USDC, gasless via Coinbase Paymaster)...`);
     console.error("Status: Secure & Connected to Z-ZERO Gateway");
-    console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, verify_receipt, set_api_key, show_api_key_status");
+    console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, ucp_probe_checkout, verify_receipt, set_api_key, show_api_key_status");
 }
 
 main().catch(console.error);

@@ -228,18 +228,31 @@ export async function getDepositAddressesRemote(): Promise<any> {
 // the server may have issued the card and the answer got lost). Any definitive
 // answer (2xx success, 4xx rejection) clears the entry, so a genuine second
 // purchase of the same item mints a fresh key and gets a fresh card.
+//
+// An UNKNOWN entry never expires on its own: time passing does not make the
+// outcome definitive — only an answer from the backend does. A retry eleven
+// minutes later must still carry the same key, or it issues a second card.
+// Memory is not a concern worth a silent new key: entries only accumulate on
+// unknown outcomes (rare) and are ~100 bytes each; we warn past a threshold.
+//
+// Limit (accepted for now): the fingerprint is the literal alias|amount|merchant.
+// Case and whitespace are normalised, but an agent that retries with "Etsy"
+// after first sending "etsy.com" looks like a new intent and gets a new key.
 // ──────────────────────────────────────────────────────────────────────────────
-const PENDING_ISSUE_TTL_MS = 10 * 60_000;   // > backend's 5-min stale-reclaim window
+const PENDING_ISSUE_WARN_AT = 50;
 const pendingIssueKeys = new Map<string, { key: string; ts: number }>();
 
 function issueFingerprint(cardAlias: string, amount: number, merchant: string): string {
-    return `${cardAlias}|${amount}|${merchant}`;
+    return `${cardAlias.trim().toLowerCase()}|${amount}|${merchant.trim().toLowerCase()}`;
 }
 
 // UNKNOWN = the request may have reached the server and issued a card even
-// though we never saw the answer. Everything else is the server speaking.
+// though we never saw the answer, OR the server says that very attempt is still
+// being processed (409 IDEMPOTENCY_IN_FLIGHT: "retry with the same key").
+// Everything else is the server giving a definitive answer.
 function issueOutcomeUnknown(data: any): boolean {
     return data?.error === "NETWORK_ERROR" ||
+        data?.error === "IDEMPOTENCY_IN_FLIGHT" ||
         (typeof data?.status === "number" && data.status >= 500);
 }
 
@@ -261,14 +274,16 @@ export async function issueTokenRemote(
     // This is safe: if on-chain tx fails, Dashboard auto-cancels the card reservation.
 
     // Reuse the pending key when the previous identical attempt has no known
-    // outcome; refresh its timestamp so an active retry loop keeps one key.
+    // outcome — for as long as that stays true, however long it takes.
     const fp = issueFingerprint(cardAlias, amount, merchant);
-    const now = Date.now();
-    for (const [k, v] of pendingIssueKeys) {
-        if (now - v.ts > PENDING_ISSUE_TTL_MS) pendingIssueKeys.delete(k);
+    const pending = pendingIssueKeys.get(fp);
+    const idempotencyKey = pending?.key ?? crypto.randomUUID();
+    if (!pending) {
+        pendingIssueKeys.set(fp, { key: idempotencyKey, ts: Date.now() });
+        if (pendingIssueKeys.size > PENDING_ISSUE_WARN_AT) {
+            console.error(`[ISSUE] ⚠️ ${pendingIssueKeys.size} card issuances with unknown outcome are pending — the backend is not answering definitively. Check connectivity before issuing more.`);
+        }
     }
-    const idempotencyKey = pendingIssueKeys.get(fp)?.key ?? crypto.randomUUID();
-    pendingIssueKeys.set(fp, { key: idempotencyKey, ts: now });
 
     const data = await apiRequest('/api/tokens/issue', 'POST', {
         card_alias: cardAlias,

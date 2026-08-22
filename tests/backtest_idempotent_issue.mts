@@ -9,6 +9,10 @@
 //     yêu cầu PHẢI gửi lại CÙNG key → backend replay thẻ cũ → tổng 1 thẻ.
 // T2: hai lần mua thành công cùng một món → PHẢI là hai key khác nhau → 2 thẻ.
 // T3: backend từ chối dứt khoát (402) → lần gọi sau là ý định MỚI → key mới.
+// T4: mất response → backend báo 409 IN_FLIGHT → retry: CẢ BA request cùng key.
+//     (Review 22/08: bản đầu xoá key sau 409 → request 3 key mới → vẫn hở.)
+// T5: UNKNOWN kéo dài hơn 10 phút vẫn PHẢI cùng key, chỉ một thẻ.
+//     (Thời gian trôi không làm kết quả dứt khoát — chỉ backend trả lời mới làm được.)
 //
 // Mock server mô phỏng đúng ngữ nghĩa idempotency_reservations của
 // /api/tokens/issue thật: key trùng + đã COMPLETED → replay token cũ.
@@ -22,7 +26,7 @@ const cards: Issued[] = [];                       // mỗi phần tử = một t
 const seenKeys: (string | undefined)[] = [];      // idempotency_key của TỪNG request đến
 const replays: string[] = [];                     // các lần backend replay thay vì phát mới
 const completed = new Map<string, string>();      // reservation: key -> token (COMPLETED)
-let mode: "drop_after_issue" | "normal" | "reject_402" = "normal";
+let mode: "drop_after_issue" | "normal" | "reject_402" | "in_flight_409" = "normal";
 let dropped = false;
 
 const server = createServer((req, res) => {
@@ -32,6 +36,14 @@ const server = createServer((req, res) => {
         const body = JSON.parse(raw || "{}");
         const key: string | undefined = body.idempotency_key;
         seenKeys.push(key);
+
+        // IN_FLIGHT phải xét TRƯỚC replay: backend thật trả 409 khi reservation
+        // còn đang xử lý, tức CHƯA COMPLETED — chưa có gì để replay.
+        if (mode === "in_flight_409") {
+            res.writeHead(409, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "IDEMPOTENCY_IN_FLIGHT", message: "Retry shortly with the same key." }));
+            return;
+        }
 
         // Replay: đúng ngữ nghĩa backend thật (COMPLETED + token còn đó).
         if (key && completed.has(key)) {
@@ -107,6 +119,40 @@ await issueTokenRemote("alias_t3", 99, "big.com");                // user đã n
 const k3a = seenKeys[seenKeys.length - 2], k3b = seenKeys[seenKeys.length - 1];
 check("T3.definitive rejection mints a NEW key next time", !!k3a && !!k3b && k3a !== k3b,
     `keys: ${k3a} vs ${k3b}`);
+
+// ── T4: mất response → 409 IN_FLIGHT → retry: ba request, một key ──
+mode = "drop_after_issue"; dropped = false;
+const n4 = seenKeys.length;
+const t4a = await issueTokenRemote("alias_t4", 33, "inflight.com");   // thẻ phát, response mất
+mode = "in_flight_409";
+const t4b = await issueTokenRemote("alias_t4", 33, "inflight.com");   // backend: vẫn đang xử lý
+mode = "normal";
+const t4c = await issueTokenRemote("alias_t4", 33, "inflight.com");   // retry → phải replay
+const k4 = seenKeys.slice(n4);
+check("T4.409 surfaces as IDEMPOTENCY_IN_FLIGHT", t4b?.error === "IDEMPOTENCY_IN_FLIGHT",
+    `got ${JSON.stringify(t4b)?.slice(0, 100)}`);
+check("T4.all three requests carry the SAME key", k4.length === 3 && !!k4[0] && k4.every(k => k === k4[0]),
+    `keys: ${JSON.stringify(k4)}`);
+check("T4.exactly ONE card for the whole sequence", cards.filter(c => c.key === k4[0]).length === 1,
+    `cards under key: ${cards.filter(c => c.key === k4[0]).length}`);
+check("T4.final retry got the original token", !!t4c?.token && t4c.token === cards.find(c => c.key === k4[0])?.token,
+    `got ${t4c?.token}`);
+
+// ── T5: UNKNOWN kéo dài > 10 phút → vẫn cùng key, một thẻ ──
+mode = "drop_after_issue"; dropped = false;
+const n5 = seenKeys.length;
+const realNow = Date.now;
+await issueTokenRemote("alias_t5", 44, "slow.com");                   // thẻ phát, response mất
+Date.now = () => realNow() + 11 * 60_000;                              // 11 phút sau
+mode = "normal";
+const t5b = await issueTokenRemote("alias_t5", 44, "slow.com");
+Date.now = realNow;
+const k5 = seenKeys.slice(n5);
+check("T5.retry after 11 minutes reuses the SAME key", k5.length === 2 && !!k5[0] && k5[0] === k5[1],
+    `keys: ${JSON.stringify(k5)}`);
+check("T5.exactly ONE card despite the delay", cards.filter(c => c.key === k5[0]).length === 1,
+    `cards: ${cards.filter(c => c.key === k5[0]).length}`);
+check("T5.original token replayed", t5b?.token === cards.find(c => c.key === k5[0])?.token, `got ${t5b?.token}`);
 
 server.close();
 console.log(`\nSUMMARY ${pass}/${pass + fail} PASS${fail ? ` — ${fail} FAIL` : ""}`);

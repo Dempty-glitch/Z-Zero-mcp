@@ -27,7 +27,7 @@ const listCardsRemote = activeBackend.listCardsRemote;
 const getDepositAddressesRemote = activeBackend.getDepositAddressesRemote;
 const getTokenPurposeRemote = activeBackend.getTokenPurposeRemote;
 
-console.error(`[Z-ZERO MCP] 🚀 Base + USDC (non-custodial, gasless)`);
+console.error(`[Z-ZERO MCP] 🚀 Base + USDC (gasless)`);
 // ────────────────────────────────────────────────────────────────────────────
 
 

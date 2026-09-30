@@ -1,9 +1,9 @@
 // Playwright Bridge - The "Invisible Hand"
 // Securely injects card data into checkout forms without exposing it to AI
 
-import { chromium } from "playwright";
 import type { CardData, PaymentResult, CheckoutHints } from "./types.js";
 import { withTimeout, TimeoutError } from "./lib/with-timeout.js";
+import { launchBrowser } from "./lib/browser.js";
 
 const CHECKOUT_HARD_TIMEOUT_MS = 60_000; // 60s absolute cap — prevents slow-loris attacks
 
@@ -24,7 +24,7 @@ export async function fillCheckoutForm(
     if (existingPage) {
         page = existingPage;
     } else {
-        browser = await chromium.launch({ headless: true });
+        browser = await launchBrowser();
         const context = await browser.newContext();
         page = await context.newPage();
     }

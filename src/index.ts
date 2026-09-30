@@ -36,7 +36,7 @@ import { ucpDiscover, UcpMcpClient, ucpCreateCheckout, type UcpAddress } from ".
 import type { CheckoutHints } from "./types.js";
 import { detectWeb3Payment } from "./lib/web3-detector.js";
 import { extractTotalPrice, detectCheckoutCurrency } from "./lib/extract-total-price.js";
-import { chromium } from "playwright";
+import { launchBrowser, warmUpBrowser } from "./lib/browser.js";
 import { setPassportKey, getPassportKey, persistPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap + rotate-on-connect
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
 import { resolveApiBaseUrl } from "./lib/api-base.js";
@@ -1237,7 +1237,7 @@ server.registerTool(
         assertSafeCheckoutUrl(checkout_url);
 
         // ── Single Browser Instance for efficiency ──────────────────
-        const browser = await chromium.launch({ headless: true });
+        const browser = await launchBrowser();
         const context = await browser.newContext();
         const page = await context.newPage();
 
@@ -1764,6 +1764,7 @@ server.prompt(
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    warmUpBrowser();
     console.error(`🔐 Z-Zero MCP Server v${CURRENT_MCP_VERSION} running (Base + USDC, gasless via Coinbase Paymaster)...`);
     console.error("Status: Secure & Connected to Z-ZERO Gateway");
     console.error("Tools: list_cards, check_balance, get_deposit_addresses, request_payment_token, get_merchant_hints, execute_payment, auto_pay_checkout, cancel_payment_token, request_human_approval, report_checkout_fail, ucp_probe_checkout, verify_receipt, set_api_key, show_api_key_status");

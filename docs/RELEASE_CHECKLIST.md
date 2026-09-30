@@ -57,6 +57,6 @@ curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=z-zero"
 Phải thấy version mới + websiteUrl https://z-zero.xyz. Registry chỉ nhận version đã tồn tại trên npm — nên bước này luôn SAU bước 4.
 
 ## Ghi chú Socket.dev (score supply-chain)
-- **Đừng thêm lại `postinstall`** vào package.json — install script là alert Socket phạt nặng (đã gỡ ở 1.6.1; playwright tự tải browser khi install, không cần echo nhắc).
+- **Đừng thêm lại `postinstall`** vào package.json — install script là alert Socket phạt nặng (đã gỡ ở 1.6.1). ⚠️ Playwright KHÔNG tự tải browser khi install (package không có install script) — từ 1.10.2 MCP tự lo lúc chạy qua `src/lib/browser.ts`: shell có sẵn → Chrome của máy → tự tải 1 lần (tải ngầm ngay khi server khởi động). Đừng xoá lớp này.
 - **Giữ block `overrides`** (map 8 polyfill sang `@socketregistry/*`) — đó là fix cho "Dependencies have 8 high alerts". Xoá block này là score tụt lại.
 - Socket index version mới chậm vài ngày; check tại https://socket.dev/npm/package/z-zero-mcp-server

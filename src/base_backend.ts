@@ -266,6 +266,8 @@ export async function issueTokenRemote(
         currency?: string;
         ship_to?: string;
     }
+,
+    opts: { merchantCountry?: string } = {}
 ): Promise<any | null> {
     // Base AA Flow (reversed from custodial):
     // 1. Create Partner card first (reservation)
@@ -290,6 +292,7 @@ export async function issueTokenRemote(
         amount,
         merchant,
         idempotency_key: idempotencyKey,
+        ...(opts.merchantCountry ? { merchant_country: opts.merchantCountry } : {}),
         device_fingerprint: `mcp-base-${process.platform}-${process.arch}`,
         network_id: process.env.NETWORK_ID || "base-usdc",
         session_id: `base-${Math.random().toString(36).substring(7)}`,
@@ -371,6 +374,7 @@ export async function resolveTokenRemote(token: string): Promise<CardData | null
         authorized_amount: data.authorized_amount ? Number(data.authorized_amount) : undefined,
         intent_id: data.intent_id || undefined,      // Primitive 1 linkage (if server supports it)
         intent_hash: data.intent_hash || undefined,
+        merchant_domain: typeof data.merchant_domain === "string" ? data.merchant_domain : null,
     };
 }
 

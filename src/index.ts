@@ -40,6 +40,7 @@ import { launchBrowser, warmUpBrowser } from "./lib/browser.js";
 import { setPassportKey, getPassportKey, persistPassportKey } from "./lib/key-store.js"; // ✅ Hot-Swap + rotate-on-connect
 import { assertSafeCheckoutUrl } from "./lib/url-guard.js";
 import { resolveApiBaseUrl } from "./lib/api-base.js";
+import { checkCheckoutUrl } from "./lib/domain-lock.js";
 import {
     TAXONOMY_VERSION,
     FAILURE_CLASSES,
@@ -287,7 +288,7 @@ server.registerTool(
     "request_payment_token",
     {
         title: "Issue JIT Card (spends $0.10 fee)",
-        description: "Request a single-use JIT virtual card ($1–$50) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
+        description: "Request a single-use JIT virtual card ($1–$50) locked to one amount + one store domain. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
         "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for. Pass `criteria` too: the few things the owner actually cared about, which this purchase gets scored against at payment time.",
         inputSchema: {
             card_alias: z
@@ -300,7 +301,12 @@ server.registerTool(
                 .describe("Amount in USD to authorize (min: $1, max: $50)"),
             merchant: z
                 .string()
-                .describe("Name or URL of the merchant/service being purchased"),
+                .describe("The store's domain or checkout URL, e.g. 'meanblvd.com'. The card is LOCKED to this domain: it will not be typed on any other site (hosted payment pages the store hands off to, like Stripe Checkout or PayPal, are allowed). A display name is rejected."),
+            merchant_country: z
+                .string()
+                .regex(/^[A-Z]{2}$/, "2-letter ISO country code, e.g. 'US'")
+                .optional()
+                .describe("Optional. The merchant's country (ISO 3166-1 alpha-2). Set it ONLY if you are sure — the card is declined in any other country."),
             cart: z
                 .array(z.object({
                     title: z.string().describe("Item name as shown on the checkout page"),
@@ -344,7 +350,7 @@ server.registerTool(
             openWorldHint: true,
         },
     },
-    async ({ card_alias, amount, merchant, cart, ship_to, criteria }) => {
+    async ({ card_alias, amount, merchant, merchant_country, cart, ship_to, criteria }) => {
         const intentInput = (cart && cart.length) || ship_to || criteria
             ? {
                 cart,
@@ -355,7 +361,7 @@ server.registerTool(
                 criteria,
             }
             : undefined;
-        const token = await issueTokenRemote(card_alias, amount, merchant, intentInput);
+        const token = await issueTokenRemote(card_alias, amount, merchant, intentInput, { merchantCountry: merchant_country });
         if (token?.error === "AUTH_REQUIRED") return authRequiredResult(token.message);
         if (!token || token.error) {
             // Show actual API error if available (e.g. 429 max cards, 402 insufficient)
@@ -777,6 +783,26 @@ server.registerTool(
                     isError: true,
                 };
             }
+        }
+
+        // 🔒 DOMAIN LOCK — the card is only typed on the store it was issued for.
+        // Checked before any browser opens; checked again on the live page right
+        // before typing (playwright_bridge). Token stays ACTIVE either way.
+        const urlLock = checkCheckoutUrl(checkout_url, cardData.merchant_domain);
+        if (!urlLock.ok) {
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: JSON.stringify({
+                        success: false,
+                        status: "blocked",
+                        message: `🚨 ${urlLock.reason}`,
+                        token_status: "ACTIVE",
+                        note: "Nothing was typed or charged. Pay on the store this card was issued for, or call cancel_payment_token to release the funds.",
+                    }, null, 2),
+                }],
+                isError: true,
+            };
         }
 
         // Step 2: Use Playwright to inject card into checkout form (with optional agent hints)

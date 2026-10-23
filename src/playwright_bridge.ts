@@ -4,6 +4,7 @@
 import type { CardData, PaymentResult, CheckoutHints } from "./types.js";
 import { withTimeout, TimeoutError } from "./lib/with-timeout.js";
 import { launchBrowser } from "./lib/browser.js";
+import { checkPaymentPage } from "./lib/domain-lock.js";
 
 const CHECKOUT_HARD_TIMEOUT_MS = 60_000; // 60s absolute cap — prevents slow-loris attacks
 
@@ -243,6 +244,14 @@ async function _fillCheckoutFormInner(
                     }
                 } catch { /* non-fatal — continue */ }
             }
+        }
+
+        // 🔒 DOMAIN LOCK — last look before the card is typed. Navigation and
+        // pre_steps may have moved us; the card goes only on its own store or a
+        // hosted payment page that store handed off to (lib/domain-lock.ts).
+        const lock = checkPaymentPage(page.url(), cardData.merchant_domain);
+        if (!lock.ok) {
+            return { success: false, status: "blocked", message: lock.reason };
         }
 
         let filledFields = 0;

@@ -34,6 +34,7 @@ export interface CardData {
     authorized_amount?: number;  // Amount authorized when token was issued (for pre-flight guard)
     intent_id?: string;          // Primitive 1: intent this token is bound to (for event/receipt labeling)
     intent_hash?: string;
+    merchant_domain?: string | null; // the only store this card may be typed on (lib/domain-lock.ts)
     error?: string;
     message?: string;
 }
@@ -44,6 +45,7 @@ export interface CardData {
 //   unconfirmed   — fields filled + Pay clicked, but no clear confirmation within the wait window (do NOT burn — funds stay recoverable)
 //   not_submitted — fields filled but no Pay button was found/clicked (do NOT burn)
 //   no_fields     — no card fields detected on the page
+//   blocked       — the page is not the store this card is locked to; nothing was typed
 //   error         — exception/timeout during the attempt
 export type PaymentOutcome =
     | 'confirmed'
@@ -51,6 +53,7 @@ export type PaymentOutcome =
     | 'unconfirmed'
     | 'not_submitted'
     | 'no_fields'
+    | 'blocked'
     | 'error';
 
 export interface PaymentResult {

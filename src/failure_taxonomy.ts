@@ -126,6 +126,8 @@ export function classifyBridgeResult(
         case "no_fields":
             if (BOT_RE.test(msg)) return { failure_class: "bot_detected", step: "navigate" };
             return { failure_class: "form_changed", step: "fill_form" };
+        case "blocked":
+            return { failure_class: "intent_mismatch", step: "navigate" };
         case "error":
             if (/timeout|timed out/i.test(msg)) return { failure_class: "timeout", step: "navigate" };
             if (BOT_RE.test(msg)) return { failure_class: "bot_detected", step: "navigate" };

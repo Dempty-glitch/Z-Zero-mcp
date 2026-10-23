@@ -1286,7 +1286,7 @@ server.registerTool(
 
                 const resp = await fetch(`${ZZERO_API}/api/wallet/transfer`, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}` },
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${API_KEY}`, "x-mcp-version": CURRENT_MCP_VERSION },
                     body: JSON.stringify({ to, amount, card_alias }),
                 });
                 const txResult = await resp.json() as any;

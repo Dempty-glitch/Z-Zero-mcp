@@ -287,7 +287,7 @@ server.registerTool(
     "request_payment_token",
     {
         title: "Issue JIT Card (spends $0.10 fee)",
-        description: "Request a single-use JIT virtual card ($1–$100) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
+        description: "Request a single-use JIT virtual card ($1–$50) locked to one amount + merchant. ⚠️ Read mcp://resources/sop first. Only call once the FINAL total is visible — for physical goods that is AFTER shipping is submitted (use get_merchant_hints to navigate there). For digital goods with the price already visible, prefer auto_pay_checkout instead. " +
         "BEFORE requesting: look at the checkout page one more time and compare it against what the user actually asked for — same items, same quantity, same variant, same destination? If anything differs, do NOT request a token; fix the cart or check with the user first. A mismatch you catch here costs nothing; after this point it costs a card. If you pass `cart`, the server signs your declared intent and binds the card to it — the user gets cryptographic proof of what this card was authorized for. Pass `criteria` too: the few things the owner actually cared about, which this purchase gets scored against at payment time.",
         inputSchema: {
             card_alias: z
@@ -296,8 +296,8 @@ server.registerTool(
             amount: z
                 .number()
                 .min(1, "Minimum amount is $1.00")
-                .max(100, "Maximum amount is $100.00")
-                .describe("Amount in USD to authorize (min: $1, max: $100)"),
+                .max(50, "Maximum amount is $50.00")
+                .describe("Amount in USD to authorize (min: $1, max: $50)"),
             merchant: z
                 .string()
                 .describe("Name or URL of the merchant/service being purchased"),
@@ -379,7 +379,7 @@ server.registerTool(
                     {
                         type: "text" as const,
                         text: balance !== undefined
-                            ? `Insufficient balance. Card "${card_alias}" has $${balance} but you requested $${amount}. Or amount is outside the $1-$100 limit.`
+                            ? `Insufficient balance. Card "${card_alias}" has $${balance} but you requested $${amount}. Or amount is outside the $1-$50 limit.`
                             : `Card "${card_alias}" not found, API key is invalid, or amount limit exceeded.`,
                     },
                 ],
@@ -1195,7 +1195,7 @@ server.registerTool(
     "auto_pay_checkout",
     {
         title: "Auto-Pay Checkout (charges the card)",
-        description: "⚠️ MANDATORY: Read mcp://resources/sop first. Only use on PAYMENT pages where final total is visible. Auto-detects Web3 or Fiat and completes payment. For physical goods (Shopify, Etsy), get_merchant_hints first.",
+        description: "⚠️ MANDATORY: Read mcp://resources/sop first. Only use on PAYMENT pages where final total is visible. Issues a JIT card and completes the payment (paying a crypto address found on the page is OFF unless the owner set Z_ZERO_ENABLE_WEB3_PAY=1). For physical goods (Shopify, Etsy), get_merchant_hints first.",
         inputSchema: {
             checkout_url: z
                 .string()
@@ -1221,7 +1221,7 @@ server.registerTool(
         // no human-authorized token to cross-check against — this range IS the only amount guard.
         // It bounds the blast radius if price extraction or a payment link is wrong/malicious.
         const AUTO_PAY_MIN_USD = 1;
-        const AUTO_PAY_MAX_USD = 100;
+        const AUTO_PAY_MAX_USD = 50;
 
         if (!API_KEY) {
             return {
@@ -1242,11 +1242,19 @@ server.registerTool(
         const page = await context.newPage();
 
         try {
-            // STEP 1: Web3 Detection
-            console.error(`[SMART ROUTE] Scanning ${checkout_url} for Web3...`);
-            const web3Result = await detectWeb3Payment(page, checkout_url);
+            // STEP 1: Web3 Detection — OFF unless the machine's owner opts in.
+            // The recipient is read off the page (any visible "ethereum:0x…" text
+            // matches, a review or comment included) and an on-chain send cannot be
+            // reversed, so paying it stays shut by default (decision 23/10/2026).
+            let web3Result: Awaited<ReturnType<typeof detectWeb3Payment>> | null = null;
+            if (process.env.Z_ZERO_ENABLE_WEB3_PAY === "1") {
+                console.error(`[SMART ROUTE] Scanning ${checkout_url} for Web3...`);
+                web3Result = await detectWeb3Payment(page, checkout_url);
+            } else {
+                await page.goto(checkout_url, { waitUntil: "domcontentloaded", timeout: 20_000 });
+            }
 
-            if (web3Result.detected && web3Result.params) {
+            if (web3Result?.detected && web3Result.params) {
                 const { to, eip681_amount, data } = web3Result.params;
                 
                 let amount = eip681_amount ?? 0;
@@ -1596,9 +1604,9 @@ Tools: \`check_balance\`, \`list_cards\`, \`get_deposit_addresses\`, \`set_api_k
 ## PATH A — Digital goods / SaaS / API (price already visible)
 
 Call \`auto_pay_checkout(checkout_url, card_alias)\` — one call:
-- Auto-detects on-chain (sends USDC on Base, gasless via Coinbase Paymaster) vs fiat (issues a JIT
-  card + fills the form).
-- Amount is read from the page and capped to $1–$100.
+- Issues a JIT card + fills the form. (Paying on-chain to an address found on the page is OFF by
+  default — the owner must set Z_ZERO_ENABLE_WEB3_PAY=1. Without it, a crypto-only page is not paid.)
+- Amount is read from the page and capped to $1–$50.
 - Read the returned \`status\` → see **PAYMENT OUTCOMES** below.
 
 ---

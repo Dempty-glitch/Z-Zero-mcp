@@ -14,7 +14,7 @@ npx z-zero-mcp-server
 
 **What makes it different:**
 - 🔐 **Zero-trust by design** — the AI never sees PAN, CVV, or expiry. Card data exists only in RAM, injected via Playwright at the last step, then wiped.
-- ⛽ **Gasless USDC on Base** — auto-detects crypto checkout (EIP-681) and settles as a gasless USDC transfer sponsored by Coinbase Paymaster. The agent holds only USDC — no ETH, no gas UX.
+- ⛽ **Gasless USDC on Base** — auto-detects crypto checkout (EIP-681) and settles as a gasless USDC transfer sponsored by Coinbase Paymaster. The agent holds only USDC — no ETH, no gas UX. **Opt-in:** off unless you set `Z_ZERO_ENABLE_WEB3_PAY=1`, because an on-chain send to an address read off a web page cannot be reversed.
 - 💳 **JIT single-use virtual cards** — amount-locked, 1-hour TTL, burned after a single use. Fiat fallback for the rest of the web.
 - 🧠 **Smart Routing + checkout intelligence** — `get_merchant_hints` serves platform-specific checkout playbooks (Shopify, Etsy, WooCommerce…).
 - ✍️ **Linked purpose + outcome** — the server signs the criteria the agent records at issuance. Before checkout, `execute_payment` hands those criteria back and requires a second call with `go` or `pause`; a confirmed purchase seals the answer into the signed receipt. The record is inspectable without pretending the platform judged whether the agent told the truth.
@@ -71,7 +71,7 @@ npx z-zero-mcp-server
 
 *The AI agent never touches card data — it only handles single-use tokens. Real card details are injected by Playwright at the last step and wiped from RAM.*
 
-> **Crypto checkout branch:** when `auto_pay_checkout` detects a crypto-native checkout (EIP-681), it skips the card flow entirely and settles as a **gasless USDC transfer on Base** — see above.
+> **Crypto checkout branch:** when `auto_pay_checkout` detects a crypto-native checkout (EIP-681), it skips the card flow entirely and settles as a **gasless USDC transfer on Base** — see above. Off by default; enable with `Z_ZERO_ENABLE_WEB3_PAY=1`.
 
 ---
 
@@ -162,7 +162,7 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 
 | Tool | Description |
 |------|-------------|
-| `auto_pay_checkout` | Fully autonomous checkout — auto-detects Web3 or Fiat and completes payment |
+| `auto_pay_checkout` | Fully autonomous checkout — issues a JIT card and completes payment (crypto checkout only with `Z_ZERO_ENABLE_WEB3_PAY=1`) |
 | `get_merchant_hints` | Fetch platform-specific checkout playbook (pre-steps + selectors) from Knowledge Base |
 | `report_checkout_fail` | Report a failed checkout with a **structured `failure_class`** (14-class enum) — feeds the self-healing loop |
 | `verify_receipt` | Verify a signed receipt by id — prove a purchase happened instead of claiming it |

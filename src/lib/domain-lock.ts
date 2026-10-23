@@ -81,3 +81,21 @@ export function checkPaymentPage(pageUrl: string, lockedDomain: string | null | 
             `The card was NOT typed in.`,
     };
 }
+
+/** Payment providers whose card-field iframes may sit inside a store's checkout. */
+const CARD_FRAME_SUFFIXES: string[] = [
+    ".stripe.com", ".shopifyinc.com", ".shopify.com", ".braintreegateway.com",
+    ".adyen.com", ".squarecdn.com", ".checkout.com", ".paypal.com",
+];
+
+/**
+ * May a card field inside this frame receive card data? Only when the frame
+ * really comes from the locked store or a payment provider — judged by its
+ * origin, never by the frame's self-chosen name (audit MCP-03 / N3).
+ */
+export function isTrustedCardFrame(frameUrl: string, lockedDomain: string | null | undefined): boolean {
+    const host = hostOf(frameUrl);
+    if (!host) return false;
+    if (lockedDomain && sameSite(host, lockedDomain)) return true;
+    return CARD_FRAME_SUFFIXES.some((s) => host === s.slice(1) || host.endsWith(s));
+}

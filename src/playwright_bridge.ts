@@ -4,7 +4,7 @@
 import type { CardData, PaymentResult, CheckoutHints } from "./types.js";
 import { withTimeout, TimeoutError } from "./lib/with-timeout.js";
 import { launchBrowser } from "./lib/browser.js";
-import { checkPaymentPage } from "./lib/domain-lock.js";
+import { checkPaymentPage, isTrustedCardFrame } from "./lib/domain-lock.js";
 
 const CHECKOUT_HARD_TIMEOUT_MS = 60_000; // 60s absolute cap — prevents slow-loris attacks
 
@@ -62,6 +62,15 @@ export async function fillCheckoutForm(
 async function smartFill(el: import("playwright").ElementHandle, value: string): Promise<boolean> {
     try {
         const tag = await el.evaluate(e => (e as HTMLElement).tagName.toLowerCase());
+        // Card data only ever goes into a form field built to hold it: an <input> of a
+        // text-like type, or a <select> (expiry). Never a textarea, a hidden or email
+        // input, or anything else a hint selector might point at (audit MCP-03) —
+        // those are where a card number would end up in an order note or a page owner's log.
+        if (tag !== 'input' && tag !== 'select') return false;
+        if (tag === 'input') {
+            const type = await el.evaluate(e => ((e as HTMLInputElement).type || 'text').toLowerCase());
+            if (!['text', 'tel', 'number', 'password'].includes(type)) return false;
+        }
         if (tag === 'select') {
             // Try by value first (most common: "01", "12", "2030")
             try { await el.selectOption({ value }); return true; } catch { /* next */ }
@@ -274,7 +283,8 @@ async function _fillCheckoutFormInner(
             let cardContexts: SearchCtx[] = [page];
             if (hints.iframe_selector) {
                 const matchingFrames = page.frames().filter((f) =>
-                    f.name().includes(hints.iframe_selector as string)
+                    f.name().includes(hints.iframe_selector as string) &&
+                    isTrustedCardFrame(f.url(), cardData.merchant_domain)
                 );
                 if (matchingFrames.length > 0) cardContexts = matchingFrames;
             }
@@ -460,12 +470,14 @@ async function _fillCheckoutFormInner(
         // We handle both by scanning ALL matching Stripe frames.
         // ============================================================
         if (filledFields === 0) {
+            // Recognised by the frame's real origin, never by its name or a substring of
+            // its URL: any frame can call itself __privateStripeFrame or carry
+            // "js.stripe.com" in a query string (audit MCP-03 / N3).
             const stripeFrames = page.frames().filter((f) => {
-                const url = f.url();
-                const name = f.name();
-                return url.includes('js.stripe.com')
-                    || url.includes('stripe.com/elements')
-                    || name.startsWith('__privateStripeFrame');
+                try {
+                    const host = new URL(f.url()).hostname;
+                    return host === 'stripe.com' || host.endsWith('.stripe.com');
+                } catch { return false; }
             });
 
             for (const frame of stripeFrames) {

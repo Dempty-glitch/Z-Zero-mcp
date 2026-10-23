@@ -414,5 +414,5 @@ export async function cancelTokenRemote(token: string): Promise<any> {
 
 export async function refundUnderspendRemote(token: string, actualSpent: number): Promise<void> {
     // console.error (NOT console.log) — stdout is the MCP stdio transport; logging there corrupts the protocol.
-    console.error(`[Z-ZERO MCP] Token ${token} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
+    console.error(`[Z-ZERO MCP] Token …${token.slice(-6)} burned. Actual spent: $${actualSpent}. On-chain refund handled by Dashboard.`);
 }

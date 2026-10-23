@@ -42,6 +42,18 @@ export function resolveApiBaseUrl(): string {
         return CANONICAL;
     }
 
+    // The Passport Key rides on every request to this host, so it must be HTTPS.
+    // Plain http is only for a local dev server (audit MCP-08).
+    const isLocal = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocal)) {
+        console.error(`[Z-ZERO MCP] ⚠️ Z_ZERO_API_BASE_URL must be https (got "${raw}") — using ${CANONICAL} instead.`);
+        return CANONICAL;
+    }
+    if (url.hostname !== new URL(CANONICAL).hostname && !LEGACY_HOSTS.has(url.hostname) && !isLocal && !warned) {
+        warned = true;
+        console.error(`[Z-ZERO MCP] ⚠️ Z_ZERO_API_BASE_URL points at ${url.hostname}, not z-zero.xyz — your Passport Key is sent there. Remove it unless you run your own Z-ZERO server.`);
+    }
+
     if (LEGACY_HOSTS.has(url.hostname)) {
         if (!warned) {
             warned = true;

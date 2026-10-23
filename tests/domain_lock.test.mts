@@ -28,3 +28,12 @@ test("live page: the store or a hosted payment page it handed off to", () => {
     assert.equal(checkPaymentPage("https://x.myshopify.com/checkouts/1", L).ok, true);
     assert.equal(checkPaymentPage("https://pay-meanblvd.com/x", L).ok, false);
 });
+
+test("card iframes are trusted by origin, never by name", async () => {
+    const { isTrustedCardFrame } = await import("../dist/lib/domain-lock.js");
+    assert.equal(isTrustedCardFrame("https://js.stripe.com/v3/elements-inner-card", L), true);
+    assert.equal(isTrustedCardFrame("https://checkout.pci.shopifyinc.com/build/x", L), true);
+    assert.equal(isTrustedCardFrame("https://meanblvd.com/pay-frame", L), true);
+    assert.equal(isTrustedCardFrame("https://evil.io/?js.stripe.com", L), false);
+    assert.equal(isTrustedCardFrame("about:blank", L), false);
+});

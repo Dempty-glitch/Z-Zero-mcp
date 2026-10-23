@@ -29,7 +29,7 @@ git add package.json package-lock.json server.json && git commit -m "release: vX
 
 ## 6. Sync `/api/version` bên DASHBOARD ← KHÁC REPO, DỄ QUÊN NHẤT & HẬU QUẢ NẶNG NHẤT
 
-Repo `z-zero-dashboard` → `src/app/api/version/route.ts`:
+Repo `z-zero-dashboard` → `src/lib/mcp-version.ts` (từ 23/10/2026; trước đó là `src/app/api/version/route.ts`):
 - `LATEST_MCP_VERSION` = version vừa publish.
 - Thêm 1 dòng vào `RELEASE_NOTES` cho version đó (agent ĐỌC câu này để biết vì sao phải nâng).
 - Nếu homepage có nhãn version (`MCP_VERSION` trong `src/app/page.tsx`) + dòng SHIPPED thì cập nhật cùng lượt.

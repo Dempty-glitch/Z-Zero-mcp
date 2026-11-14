@@ -85,7 +85,7 @@ export function assertSafeCheckoutUrl(rawUrl: string): void {
         throw new Error(`Invalid checkout_url: ${rawUrl}`);
     }
 
-    const hostname = url.hostname;
+    const hostname = url.hostname.toLowerCase();
 
     // Loopback checkout targets are an EXPLICIT opt-in, never a side effect of
     // NODE_ENV. This server runs on the end user's machine, where NODE_ENV is
@@ -111,6 +111,17 @@ export function assertSafeCheckoutUrl(rawUrl: string): void {
 
     if (url.protocol !== "https:") {
         throw new Error("checkout_url must use HTTPS.");
+    }
+    // A store's checkout is on the default port. Another port on the same host is
+    // another program, not the store (audit T11 F6).
+    if (url.port !== "") {
+        throw new Error(`checkout_url must use the default HTTPS port (got :${url.port}).`);
+    }
+    // Chromium sends every *.localhost name (and "localhost.") to this machine
+    // itself, whatever DNS says (audit T11 F3 / T19).
+    const bareName = hostname.replace(/\.$/, "");
+    if (bareName === "localhost" || bareName.endsWith(".localhost")) {
+        throw new Error(`SSRF blocked host: ${hostname}`);
     }
     if (PRIVATE_HOST_PATTERNS.some((p) => p.test(hostname))) {
         throw new Error(`SSRF blocked host: ${hostname}`);

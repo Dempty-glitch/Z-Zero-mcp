@@ -4,34 +4,47 @@
 import type { CardData, PaymentResult, CheckoutHints } from "./types.js";
 import { withTimeout, TimeoutError } from "./lib/with-timeout.js";
 import { launchBrowser } from "./lib/browser.js";
-import { checkPaymentPage, isTrustedCardFrame } from "./lib/domain-lock.js";
+import { checkPaymentPage, isTrustedCardFrame, type LockCheck } from "./lib/domain-lock.js";
+import { scrubCardValues } from "./failure_taxonomy.js";
 
 const CHECKOUT_HARD_TIMEOUT_MS = 60_000; // 60s absolute cap — prevents slow-loris attacks
+const PAGE_DETAIL_MAX = 300;
+
+type Page = import("playwright").Page;
+type Frame = import("playwright").Frame;
+type ElementHandle = import("playwright").ElementHandle;
 
 /**
  * Detects and fills credit card form fields on a checkout page.
  * Card data exists ONLY in RAM and is wiped after injection.
  * Hard timeout of 60s prevents merchant page from hanging indefinitely.
+ *
+ * Nothing this function returns may carry the card (audit T12 F3, M.1): a
+ * Playwright error quotes the value it was filling (`fill("4242…")`), and a page
+ * can echo the number back as its "order number". Every string leaving here goes
+ * through finish(), which strips this card's own number and CVV, then every
+ * other card-shaped number.
  */
 export async function fillCheckoutForm(
     checkoutUrl: string,
     cardData: CardData,
-    existingPage?: import("playwright").Page,
+    existingPage?: Page,
     hints?: CheckoutHints
 ): Promise<PaymentResult> {
+    // Kept only to scrub output; the bridge wipes cardData itself.
+    const secrets = { number: cardData.number, cvv: cardData.cvv };
     let browser: import("playwright").Browser | null = null;
-    let page: import("playwright").Page;
-
-    if (existingPage) {
-        page = existingPage;
-    } else {
-        browser = await launchBrowser();
-        const context = await browser.newContext();
-        page = await context.newPage();
-    }
+    let page: Page;
 
     try {
-        return await withTimeout(
+        if (existingPage) {
+            page = existingPage;
+        } else {
+            browser = await launchBrowser();
+            const context = await browser.newContext();
+            page = await context.newPage();
+        }
+        const result = await withTimeout(
             _fillCheckoutFormInner(page, checkoutUrl, cardData, hints),
             CHECKOUT_HARD_TIMEOUT_MS,
             'fillCheckoutForm',
@@ -40,27 +53,171 @@ export async function fillCheckoutForm(
                 if (browser) await browser.close().catch(() => {});
             }
         );
+        return finish(result, secrets);
     } catch (err: unknown) {
         if (err instanceof TimeoutError) {
-            return {
+            return finish({
                 success: false,
                 status: 'error',
                 message: `Checkout timed out after ${CHECKOUT_HARD_TIMEOUT_MS / 1000}s. The merchant page may be too slow or blocking automation.`,
-            };
+            }, secrets);
         }
-        const errMsg = err instanceof Error ? err.message : String(err);
-        return { success: false, status: 'error', message: `Payment failed: ${errMsg}` };
+        return finish({
+            success: false,
+            status: 'error',
+            message: 'The browser failed during the checkout attempt.',
+            page_detail: err instanceof Error ? err.message : String(err),
+        }, secrets);
     } finally {
         if (browser) await browser.close().catch(() => {});
+        // Wipe the copy too: fill is over, nothing needs the values any more.
+        secrets.number = "";
+        secrets.cvv = "";
     }
+}
+
+/** Last stop before a result leaves the bridge: no card value in any string. */
+function finish(r: PaymentResult, secrets: { number?: string; cvv?: string }): PaymentResult {
+    const out: PaymentResult = { ...r, message: scrubCardValues(r.message, secrets) };
+    if (r.page_detail) {
+        out.page_detail = scrubCardValues(r.page_detail, secrets).slice(0, PAGE_DETAIL_MAX);
+    }
+    if (r.receipt_id !== undefined) {
+        out.receipt_id = cleanReceiptId(r.receipt_id, secrets);
+    }
+    return out;
+}
+
+/**
+ * An order number is page text. It goes into the agent's result, the signed
+ * receipt and the public receipt page, so: short, plain characters only, and
+ * dropped outright if it holds this card's number or CVV, or anything that can
+ * be a card number. A dropped id costs a convenience; a kept one could cost the
+ * card (audit T12 F3: a page echoed "Order number: <PAN>-<CVV>").
+ */
+function cleanReceiptId(id: string | undefined, secrets: { number?: string; cvv?: string }): string | undefined {
+    if (!id) return undefined;
+    const plain = id.normalize("NFKC").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/.test(plain)) return undefined;
+    return scrubCardValues(plain, secrets, { cards: "valid" }) === plain ? plain : undefined;
+}
+
+// ============================================================
+// CARD GATE — where a card value may go (audit T11 F2, T12 F1/F2, T00 F1; M.2)
+//
+// checkPaymentPage() looked at the page once, before the first field. A page
+// that moved a few hundred ms later still received the card, and an agent's
+// selector could reach into any frame on the page. Now every single field is
+// judged on its own, at the moment it is typed into:
+//   - the page has not moved to another origin since the lock check;
+//   - the field lives in the main page of the locked store, or in a frame whose
+//     REAL origin is the store or a known card-field provider;
+//   - on the main page, the field looks like a card field and a person can see
+//     it (not an order note, not an invisible 2px box over the real iframe).
+// ============================================================
+type FieldKind = 'number' | 'exp' | 'cvv' | 'name';
+
+const FIELD_SHAPE: Record<FieldKind, RegExp> = {
+    number: /cc-?number|card.?num|cardnumber|credit.?card|card.?no\b|\bccnum|\bpan\b|card[_\s-]?number/i,
+    exp: /cc-exp|exp(iry|iration|ires)?\b|exp[-_\s]?(date|month|year|mm|yy)|\bmm\s*\/\s*yy|valid.?thru/i,
+    cvv: /cc-csc|\bcvv|\bcvc|\bcsc\b|security.?code|card.?code|verification|cvn/i,
+    name: /cc-name|card.?holder|name.?on.?card|ccname|card.?name/i,
+};
+
+class CardGate {
+    private lockedOrigin: string | null = null;
+    private movedTo: string | null = null;
+    private readonly onNav: (f: Frame) => void;
+
+    constructor(private readonly page: Page, private readonly lockedDomain: string | null | undefined) {
+        this.onNav = (f: Frame) => {
+            if (f !== this.page.mainFrame() || !this.lockedOrigin || this.movedTo) return;
+            if (originOf(f.url()) !== this.lockedOrigin) this.movedTo = f.url();
+        };
+    }
+
+    /** Lock to the page in front of us now. Any later move to another origin stops the fill. */
+    arm(): LockCheck {
+        const lock = checkPaymentPage(this.page.url(), this.lockedDomain);
+        if (!lock.ok) return lock;
+        this.lockedOrigin = originOf(this.page.url());
+        this.page.on('framenavigated', this.onNav);
+        return lock;
+    }
+
+    dispose(): void {
+        this.page.off('framenavigated', this.onNav);
+    }
+
+    /** Stop everything: the page itself has gone somewhere else. */
+    moved(): LockCheck | null {
+        if (this.movedTo) return blockedMove(this.movedTo);
+        if (originOf(this.page.url()) !== this.lockedOrigin) return blockedMove(this.page.url());
+        const live = checkPaymentPage(this.page.url(), this.lockedDomain);
+        return live.ok ? null : live;
+    }
+
+    /** May this one field receive this one value? false = skip the field, never type. */
+    async allows(el: ElementHandle, kind: FieldKind): Promise<boolean> {
+        if (this.moved()) return false;
+        const frame = await el.ownerFrame().catch(() => null);
+        if (!frame) return false;
+        if (frame === this.page.mainFrame()) {
+            if (originOf(frame.url()) !== this.lockedOrigin) return false;
+            return (await looksLikeCardField(el, kind)) && (await isHumanVisible(el));
+        }
+        return isTrustedCardFrame(frame.url(), this.lockedDomain);
+    }
+}
+
+function originOf(url: string): string | null {
+    try {
+        const o = new URL(url).origin;
+        return o === "null" ? null : o;
+    } catch { return null; }
+}
+
+function blockedMove(to: string): LockCheck {
+    return {
+        ok: false,
+        reason: `The page moved to ${hostOf(to)} while the card was being filled in. Filling stopped; nothing more was typed and the order was not submitted.`,
+    };
+}
+
+function hostOf(url: string): string {
+    try { return new URL(url).host || "an unreadable address"; } catch { return "an unreadable address"; }
+}
+
+async function looksLikeCardField(el: ElementHandle, kind: FieldKind): Promise<boolean> {
+    const attrs = await el.evaluate((e) => {
+        const a = (n: string) => (e as HTMLElement).getAttribute(n) || "";
+        return [a("autocomplete"), a("name"), a("id"), a("placeholder"), a("aria-label"), a("data-elements-stable-field-name")].join(" ");
+    }).catch(() => "");
+    return FIELD_SHAPE[kind].test(attrs);
+}
+
+async function isHumanVisible(el: ElementHandle): Promise<boolean> {
+    if (!(await el.isVisible().catch(() => false))) return false;
+    return el.evaluate((e) => {
+        const r = (e as HTMLElement).getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) return false;
+        let opacity = 1;
+        for (let n: Element | null = e as Element; n; n = n.parentElement) {
+            const s = getComputedStyle(n);
+            if (s.visibility === "hidden" || s.display === "none") return false;
+            opacity *= parseFloat(s.opacity || "1");
+        }
+        return opacity >= 0.1;
+    }).catch(() => false);
 }
 
 // ============================================================
 // HELPER: Smart fill — handles both <input> and <select>
 // Prevents crash when dropdown uses <select> instead of <input>
 // ============================================================
-async function smartFill(el: import("playwright").ElementHandle, value: string): Promise<boolean> {
+async function smartFill(gate: CardGate, el: ElementHandle, value: string, kind: FieldKind): Promise<boolean> {
     try {
+        if (!(await gate.allows(el, kind))) return false;
         const tag = await el.evaluate(e => (e as HTMLElement).tagName.toLowerCase());
         // Card data only ever goes into a form field built to hold it: an <input> of a
         // text-like type, or a <select> (expiry). Never a textarea, a hidden or email
@@ -87,24 +244,37 @@ async function smartFill(el: import("playwright").ElementHandle, value: string):
             return true;
         }
     } catch {
+        // Never rethrow: a Playwright fill error quotes the value it was typing.
         return false;
     }
 }
 
 /** Try each selector in order, smartFill the first match */
 async function tryFillField(
-    page: import("playwright").Page,
+    gate: CardGate,
+    ctx: Page | Frame,
     selectors: string[],
-    value: string
+    value: string,
+    kind: FieldKind
 ): Promise<boolean> {
     for (const selector of selectors) {
-        const el = await page.$(selector);
+        const el = await ctx.$(selector).catch(() => null);
         if (el) {
-            const ok = await smartFill(el, value);
+            const ok = await smartFill(gate, el, value, kind);
             if (ok) return true;
         }
     }
     return false;
+}
+
+/**
+ * A hint selector is plain CSS. Playwright also reads `>>` chains and its own
+ * engines (`internal:control=enter-frame`, `xpath=`…), which let one string walk
+ * into another site's frame (audit T12 F1). Those are refused outright.
+ */
+function isPlainCss(selector: string | undefined): selector is string {
+    if (!selector) return false;
+    return !/>>|^\s*[a-z_-]+=|internal:/i.test(selector);
 }
 
 // ============================================================
@@ -128,13 +298,59 @@ const RECEIPT_RE = /(?:order|confirmation|receipt)\s*(?:number|no\.?|#)?[:\s#]*(
 type OutcomeKind = 'confirmed' | 'declined' | 'unconfirmed';
 
 /**
+ * The text a person looking at the page can actually read (audit T12 F6, M.7).
+ * innerText still counts text that is transparent, 0px, or parked off-screen —
+ * a page could hide "Order number: …" there and have a non-payment read as paid
+ * (the token then burns and the money sits in USED with no way back).
+ */
+async function readableText(page: Page): Promise<string> {
+    return page.evaluate(() => {
+        const out: string[] = [];
+        const docW = Math.max(document.documentElement.scrollWidth, window.innerWidth);
+        const docH = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+        const seen = new Map<Element, boolean>();
+        const readable = (el: Element): boolean => {
+            const cached = seen.get(el);
+            if (cached !== undefined) return cached;
+            let ok = true;
+            const r = el.getBoundingClientRect();
+            if (r.width < 1 || r.height < 1) ok = false;
+            const left = r.left + window.scrollX;
+            const top = r.top + window.scrollY;
+            if (ok && (left + r.width <= 0 || top + r.height <= 0 || left >= docW || top >= docH)) ok = false;
+            if (ok) {
+                let opacity = 1;
+                for (let n: Element | null = el; n; n = n.parentElement) {
+                    const s = getComputedStyle(n);
+                    if (s.display === "none" || s.visibility === "hidden") { ok = false; break; }
+                    opacity *= parseFloat(s.opacity || "1");
+                    if (n === el && parseFloat(s.fontSize || "16") < 6) { ok = false; break; }
+                }
+                if (ok && opacity < 0.1) ok = false;
+            }
+            seen.set(el, ok);
+            return ok;
+        };
+        const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+            const t = (n.textContent || "").trim();
+            const parent = n.parentElement;
+            if (!t || !parent || ["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"].includes(parent.tagName)) continue;
+            if (readable(parent)) out.push(t);
+            if (out.length > 4000) break;
+        }
+        return out.join("\n");
+    });
+}
+
+/**
  * Watches the page after Pay is clicked and classifies the real outcome.
- * Polls URL + visible text for a confirmation or decline signal until a
+ * Polls URL + readable text for a confirmation or decline signal until a
  * signal is seen or CONFIRM_WAIT_MS elapses. Default (no signal) is the
  * SAFE 'unconfirmed' — caller must NOT burn the token on that.
  */
 async function detectPaymentOutcome(
-    page: import("playwright").Page,
+    page: Page,
     checkoutUrl: string
 ): Promise<{ kind: OutcomeKind; receipt_id?: string }> {
     const checkoutPath = (() => {
@@ -147,10 +363,10 @@ async function detectPaymentOutcome(
         let bodyText = '';
         try {
             currentUrl = page.url();
-            bodyText = await page.evaluate(() => document.body?.innerText ?? '');
+            bodyText = await readableText(page);
         } catch {
             // page is mid-navigation — wait and retry
-            await page.waitForTimeout(CONFIRM_POLL_MS);
+            await page.waitForTimeout(CONFIRM_POLL_MS).catch(() => {});
             continue;
         }
 
@@ -170,7 +386,7 @@ async function detectPaymentOutcome(
             return { kind: 'confirmed', receipt_id: m?.[1] };
         }
 
-        await page.waitForTimeout(CONFIRM_POLL_MS);
+        await page.waitForTimeout(CONFIRM_POLL_MS).catch(() => {});
     }
 
     // No clear signal within the window — safe default, caller will NOT burn.
@@ -208,13 +424,24 @@ function outcomeToResult(
     }
 }
 
+/** Click the pay button only while the page is still the one we locked to. */
+async function clickIfStillLocked(gate: CardGate, btn: ElementHandle): Promise<LockCheck | 'clicked' | 'not_clicked'> {
+    const moved = gate.moved();
+    if (moved) return moved;
+    try {
+        if (await btn.isVisible()) { await btn.click(); return 'clicked'; }
+    } catch { /* covered, detached, … — treat as not clicked */ }
+    return 'not_clicked';
+}
+
 /** Internal implementation — called by fillCheckoutForm inside a timeout wrapper */
 async function _fillCheckoutFormInner(
-    page: import("playwright").Page,
+    page: Page,
     checkoutUrl: string,
     cardData: CardData,
     hints?: CheckoutHints
 ): Promise<PaymentResult> {
+    const gate = new CardGate(page, cardData.merchant_domain);
     try {
         // ✅ FIX: Skip navigation if page already loaded (Single Browser reuse from auto_pay_checkout)
         // Prevents double-navigate which would reload page and lose cart/session state.
@@ -245,6 +472,7 @@ async function _fillCheckoutFormInner(
         // ============================================================
         if (hints?.pre_steps && hints.pre_steps.length > 0) {
             for (const selector of hints.pre_steps) {
+                if (!isPlainCss(selector)) continue;
                 try {
                     const el = await page.$(selector);
                     if (el && await el.isVisible()) {
@@ -255,97 +483,82 @@ async function _fillCheckoutFormInner(
             }
         }
 
-        // 🔒 DOMAIN LOCK — last look before the card is typed. Navigation and
-        // pre_steps may have moved us; the card goes only on its own store or a
-        // hosted payment page that store handed off to (lib/domain-lock.ts).
-        const lock = checkPaymentPage(page.url(), cardData.merchant_domain);
+        // 🔒 DOMAIN LOCK — armed on the page in front of us now, then held for every
+        // field (CardGate). The card goes only on its own store or a hosted payment
+        // page that store handed off to (lib/domain-lock.ts).
+        const lock = gate.arm();
         if (!lock.ok) {
             return { success: false, status: "blocked", message: lock.reason };
         }
 
         let filledFields = 0;
+        let cardNumberFilled = false;
+        const stopIfMoved = (): PaymentResult | null => {
+            const moved = gate.moved();
+            return moved && !moved.ok ? { success: false, status: "blocked", message: moved.reason } : null;
+        };
 
         // ============================================================
         // STRATEGY 0.5: Agent-provided selectors (from get_merchant_hints)
         // Tried first — agent already read the DOM and knows exact locations.
-        // Supports iframe_selector: if provided, card fields are searched INSIDE
-        // matching iframes (e.g. Shopify "card-fields-iframe") rather than main page.
+        // iframe_selector: card fields are searched INSIDE frames whose name holds
+        // that fragment AND whose real origin is the store or a card-field provider.
+        // No such frame → the card fields are not searched anywhere else (the main
+        // page is where an order note lives; audit T11 F4 / T00 F1).
         // Name on card is always searched on the main page (outside iframe).
-        // Falls through to Strategy 1 if nothing matched.
+        // Falls through to Strategy 1 if the card number could not be placed.
         // ============================================================
         if (hints && (hints.card_selector || hints.exp_selector || hints.cvv_selector)) {
-            const hintFillResults: boolean[] = [];
-
-            // Determine search context: matching iframe frames or main page.
-            // When iframe_selector is set, Playwright finds frames whose name includes
-            // that fragment. Shopify uses separate iframes per field so we collect ALL.
-            type SearchCtx = import('playwright').Frame | import('playwright').Page;
-            let cardContexts: SearchCtx[] = [page];
+            let cardContexts: (Frame | Page)[] = [page];
             if (hints.iframe_selector) {
-                const matchingFrames = page.frames().filter((f) =>
+                // Card frames load after the page; until then they sit at about:blank
+                // and fail the origin check.
+                await page.waitForLoadState("load", { timeout: 10_000 }).catch(() => {});
+                cardContexts = page.frames().filter((f) =>
+                    f !== page.mainFrame() &&
                     f.name().includes(hints.iframe_selector as string) &&
                     isTrustedCardFrame(f.url(), cardData.merchant_domain)
                 );
-                if (matchingFrames.length > 0) cardContexts = matchingFrames;
             }
 
-            // Card number
-            if (hints.card_selector) {
-                for (const ctx of cardContexts) {
-                    const el = await ctx.$(hints.card_selector);
-                    if (el) { hintFillResults.push(await smartFill(el, cardData.number)); break; }
+            const fillHint = async (selector: string | undefined, value: string, kind: FieldKind, contexts: (Frame | Page)[]): Promise<boolean> => {
+                if (!isPlainCss(selector)) return false;
+                for (const ctx of contexts) {
+                    const el = await ctx.$(selector).catch(() => null);
+                    if (el) return smartFill(gate, el, value, kind);
                 }
-            }
+                return false;
+            };
 
-            // Expiry combined (with space-padded slash for Shopify: "MM / YY")
+            let hintFilled = 0;
+            if (await fillHint(hints.card_selector, cardData.number, 'number', cardContexts)) { hintFilled++; cardNumberFilled = true; }
             if (hints.exp_selector) {
-                const expiryVal = `${cardData.exp_month} / ${cardData.exp_year.slice(-2)}`;
-                for (const ctx of cardContexts) {
-                    const el = await ctx.$(hints.exp_selector);
-                    if (el) { hintFillResults.push(await smartFill(el, expiryVal)); break; }
-                }
+                // Expiry combined (with space-padded slash for Shopify: "MM / YY")
+                if (await fillHint(hints.exp_selector, `${cardData.exp_month} / ${cardData.exp_year.slice(-2)}`, 'exp', cardContexts)) hintFilled++;
+            } else if (hints.exp_month_selector) {
+                if (await fillHint(hints.exp_month_selector, cardData.exp_month, 'exp', cardContexts)) hintFilled++;
+                if (await fillHint(hints.exp_year_selector, cardData.exp_year, 'exp', cardContexts)) hintFilled++;
             }
-
-            // Expiry split month/year
-            if (!hints.exp_selector && hints.exp_month_selector) {
-                for (const ctx of cardContexts) {
-                    const elM = await ctx.$(hints.exp_month_selector);
-                    if (elM) { hintFillResults.push(await smartFill(elM, cardData.exp_month)); break; }
-                }
-                if (hints.exp_year_selector) {
-                    for (const ctx of cardContexts) {
-                        const elY = await ctx.$(hints.exp_year_selector);
-                        if (elY) { hintFillResults.push(await smartFill(elY, cardData.exp_year)); break; }
-                    }
-                }
-            }
-
-            // CVV
-            if (hints.cvv_selector) {
-                for (const ctx of cardContexts) {
-                    const el = await ctx.$(hints.cvv_selector);
-                    if (el) { hintFillResults.push(await smartFill(el, cardData.cvv)); break; }
-                }
-            }
-
+            if (await fillHint(hints.cvv_selector, cardData.cvv, 'cvv', cardContexts)) hintFilled++;
             // Name on card — ALWAYS on main page (outside iframe for Shopify/most platforms)
-            if (hints.name_selector) {
-                const el = await page.$(hints.name_selector);
-                if (el) { hintFillResults.push(await smartFill(el, cardData.name)); }
-            }
+            if (cardNumberFilled && await fillHint(hints.name_selector, cardData.name, 'name', [page])) hintFilled++;
 
-            const hintSuccesses = hintFillResults.filter(Boolean).length;
-            if (hintSuccesses > 0) {
-                filledFields += hintSuccesses;
+            const stopped = stopIfMoved();
+            if (stopped) return stopped;
+
+            if (cardNumberFilled) {
+                filledFields += hintFilled;
                 const modeNote = `${filledFields} fields injected via agent hints${hints.iframe_selector ? ' (iframe mode)' : ''}.`;
 
                 // Must actually submit to have any chance of a real payment.
                 let clicked = false;
-                if (hints.submit_selector) {
-                    try {
-                        const btn = await page.$(hints.submit_selector);
-                        if (btn && await btn.isVisible()) { await btn.click(); clicked = true; }
-                    } catch { /* non-fatal */ }
+                if (isPlainCss(hints.submit_selector)) {
+                    const btn = await page.$(hints.submit_selector).catch(() => null);
+                    if (btn) {
+                        const c = await clickIfStillLocked(gate, btn);
+                        if (typeof c === 'object') return { success: false, status: 'blocked', message: c.ok ? '' : c.reason };
+                        clicked = c === 'clicked';
+                    }
                 }
 
                 if (!clicked) {
@@ -363,7 +576,7 @@ async function _fillCheckoutFormInner(
                 const outcome = await detectPaymentOutcome(page, checkoutUrl);
                 return outcomeToResult(outcome, modeNote);
             }
-            // hints provided but nothing matched → fall through to Strategy 1
+            // hints provided but the card number could not be placed → fall through to Strategy 1
         }
 
         // ============================================================
@@ -441,80 +654,70 @@ async function _fillCheckoutFormInner(
         };
 
         // Card Number
-        if (await tryFillField(page, S.number, cardData.number)) filledFields++;
+        if (await tryFillField(gate, page, S.number, cardData.number, 'number')) { filledFields++; cardNumberFilled = true; }
 
         // Expiry: try combined MM/YY first
         const expiryValue = `${cardData.exp_month}/${cardData.exp_year.slice(-2)}`;
-        let expiryFilled = await tryFillField(page, S.expiry, expiryValue);
+        let expiryFilled = await tryFillField(gate, page, S.expiry, expiryValue, 'exp');
         if (expiryFilled) filledFields++;
 
         // Expiry: fallback to separate month + year (works with both <input> AND <select>)
         if (!expiryFilled) {
-            if (await tryFillField(page, S.exp_month, cardData.exp_month)) filledFields++;
-            if (await tryFillField(page, S.exp_year, cardData.exp_year)) filledFields++;
+            if (await tryFillField(gate, page, S.exp_month, cardData.exp_month, 'exp')) filledFields++;
+            if (await tryFillField(gate, page, S.exp_year, cardData.exp_year, 'exp')) filledFields++;
         }
 
         // CVV
-        if (await tryFillField(page, S.cvv, cardData.cvv)) filledFields++;
+        if (await tryFillField(gate, page, S.cvv, cardData.cvv, 'cvv')) filledFields++;
 
         // Name on Card
-        if (await tryFillField(page, S.name, cardData.name)) filledFields++;
+        if (await tryFillField(gate, page, S.name, cardData.name, 'name')) filledFields++;
+
+        const stopped1 = stopIfMoved();
+        if (stopped1) return stopped1;
 
         // ============================================================
         // STRATEGY 2: Stripe Elements (iframe-based)
         // Stripe renders payment inputs inside iframes from js.stripe.com.
-        // Some merchants use __privateStripeFrame* named frames.
         // Stripe has 2 modes:
         //   - Unified: 1 iframe with all fields (card, exp, cvc in one)
         //   - Split: separate iframes per field (cardNumber, cardExpiry, cardCvc)
         // We handle both by scanning ALL matching Stripe frames.
         // ============================================================
-        if (filledFields === 0) {
+        if (!cardNumberFilled) {
+            await page.waitForLoadState("load", { timeout: 10_000 }).catch(() => {});
             // Recognised by the frame's real origin, never by its name or a substring of
             // its URL: any frame can call itself __privateStripeFrame or carry
             // "js.stripe.com" in a query string (audit MCP-03 / N3).
             const stripeFrames = page.frames().filter((f) => {
                 try {
-                    const host = new URL(f.url()).hostname;
-                    return host === 'stripe.com' || host.endsWith('.stripe.com');
+                    const u = new URL(f.url());
+                    return u.protocol === 'https:' && (u.hostname === 'stripe.com' || u.hostname.endsWith('.stripe.com'));
                 } catch { return false; }
             });
 
             for (const frame of stripeFrames) {
-                // Card Number
-                for (const sel of [
+                if (await tryFillField(gate, frame, [
                     'input[name="cardnumber"]',
                     'input[autocomplete="cc-number"]',
                     'input[data-elements-stable-field-name="cardNumber"]',
-                ]) {
-                    const el = await frame.$(sel);
-                    if (el) { await el.fill(cardData.number); filledFields++; break; }
-                }
+                ], cardData.number, 'number')) { filledFields++; cardNumberFilled = true; }
 
                 // Expiry (Stripe uses MM/YY without slash)
-                for (const sel of [
+                if (await tryFillField(gate, frame, [
                     'input[name="exp-date"]',
                     'input[autocomplete="cc-exp"]',
                     'input[data-elements-stable-field-name="cardExpiry"]',
-                ]) {
-                    const el = await frame.$(sel);
-                    if (el) {
-                        await el.fill(`${cardData.exp_month}${cardData.exp_year.slice(-2)}`);
-                        filledFields++;
-                        break;
-                    }
-                }
+                ], `${cardData.exp_month}${cardData.exp_year.slice(-2)}`, 'exp')) filledFields++;
 
-                // CVC
-                for (const sel of [
+                if (await tryFillField(gate, frame, [
                     'input[name="cvc"]',
                     'input[autocomplete="cc-csc"]',
                     'input[data-elements-stable-field-name="cardCvc"]',
-                ]) {
-                    const el = await frame.$(sel);
-                    if (el) { await el.fill(cardData.cvv); filledFields++; break; }
-                }
+                ], cardData.cvv, 'cvv')) filledFields++;
             }
+            const stopped2 = stopIfMoved();
+            if (stopped2) return stopped2;
         }
 
         if (filledFields === 0) {
@@ -524,11 +727,12 @@ async function _fillCheckoutFormInner(
                 message:
                     "Could not detect any credit card fields on this page. " +
                     (landedElsewhere
-                        ? `The checkout URL redirected to ${landedUrl} — the cart/session likely did not carry over. ` +
+                        ? "The checkout URL redirected elsewhere (see page_detail) — the cart/session likely did not carry over. " +
                           "Z-Zero opens its OWN fresh browser, so checkout_url must be resumable on its own " +
                           "(e.g. a Shopify/Etsy checkout-token URL), not a page that needs the agent's logged-in session. "
                         : "") +
                     "The checkout form may use an unsupported format, or the page requires a logged-in session.",
+                ...(landedElsewhere ? { page_detail: `landed on: ${landedUrl}` } : {}),
             };
         }
 
@@ -546,12 +750,11 @@ async function _fillCheckoutFormInner(
 
         let clicked = false;
         for (const selector of payButtonSelectors) {
-            const btn = await page.$(selector);
-            if (btn && (await btn.isVisible())) {
-                await btn.click();
-                clicked = true;
-                break;
-            }
+            const btn = await page.$(selector).catch(() => null);
+            if (!btn) continue;
+            const c = await clickIfStillLocked(gate, btn);
+            if (typeof c === 'object') return { success: false, status: 'blocked', message: c.ok ? '' : c.reason };
+            if (c === 'clicked') { clicked = true; break; }
         }
 
         const fieldNote = `${filledFields} fields injected.`;
@@ -572,13 +775,14 @@ async function _fillCheckoutFormInner(
         const outcome = await detectPaymentOutcome(page, checkoutUrl);
         return outcomeToResult(outcome, fieldNote);
     } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : String(error);
         return {
             success: false,
             status: 'error',
-            message: `Payment failed: ${errMsg}`,
+            message: 'The browser failed during the checkout attempt.',
+            page_detail: error instanceof Error ? error.message : String(error),
         };
     } finally {
+        gate.dispose();
         // ============================================================
         // RAM WIPE - Critical security step
         // ============================================================

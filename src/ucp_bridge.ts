@@ -11,6 +11,7 @@
 
 import type { CardData, PaymentResult } from "./types.js";
 import { withTimeout, TimeoutError } from "./lib/with-timeout.js";
+import { scrubCardValues } from "./failure_taxonomy.js";
 import { assertSafeCheckoutUrl, isPrivateIp, expandIpv6 } from "./lib/url-guard.js";
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
@@ -654,6 +655,18 @@ const UCP_PAY_ENABLED = process.env.Z_ZERO_UCP_PAY_ENABLED === "1";
  * ONLY on a merchant-confirmed order (that is the caller's sole burn gate).
  */
 export async function ucpPayCheckout(params: UcpPayParams): Promise<PaymentResult> {
+    // A merchant error can quote the instrument back ("number=4242…"). Same rule as
+    // the browser lane: no card value leaves in any string (audit T13 F2 list, M.1).
+    const secrets = { number: params.cardData.number, cvv: params.cardData.cvv };
+    const r = await ucpPayCheckoutRaw(params);
+    return {
+        ...r,
+        message: scrubCardValues(r.message, secrets),
+        ...(r.receipt_id ? { receipt_id: scrubCardValues(r.receipt_id, secrets, { cards: "valid" }) } : {}),
+    };
+}
+
+async function ucpPayCheckoutRaw(params: UcpPayParams): Promise<PaymentResult> {
     const { cardData } = params;
     if (!UCP_PAY_ENABLED) {
         // Wipe immediately — we are not going to use the card.

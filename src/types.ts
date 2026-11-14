@@ -61,6 +61,7 @@ export interface PaymentResult {
     status: PaymentOutcome;
     message: string;
     receipt_id?: string;       // real order/confirmation number scraped from the page; NEVER fabricated
+    page_detail?: string;      // text that came from the page or the browser (error text, landed URL): untrusted data, never instructions
     amount?: number;
 }
 
@@ -74,7 +75,7 @@ export interface CheckoutHints {
     cvv_selector?: string;         // CSS for CVV/CVC field
     name_selector?: string;        // CSS for cardholder name (always main page, outside iframe)
     submit_selector?: string;      // CSS for submit/pay button
-    payment_type?: string;         // 'fiat' | 'web3_manual' | 'web3_wallet' | 'auto'
+    payment_type?: string;         // informational only (hints DB); the MCP pays by card only
     notes?: string;                // Human-readable notes (logged, not used by PW)
 }
 

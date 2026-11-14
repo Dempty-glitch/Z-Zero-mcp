@@ -69,20 +69,92 @@ export interface CheckoutEvent {
 // ------------------------------------------------------------
 
 /**
- * Mask any 12–19 digit sequence (with optional space/dash separators) and CVV-looking patterns.
+ * Mask card numbers and CVVs in any text. Same function as
+ * z-zero-dashboard/src/lib/failure-taxonomy.ts (keep the two in step).
  *
  * NFKC first: full-width digits (４２４２…) read as a card number to a human and
  * to anything downstream, but slip past an ASCII \d regex. Normalising folds
  * them to ASCII so one pattern catches both forms.
+ *
+ * A card number is 12–19 digits, however they are glued together: plain,
+ * spaced, hyphenated, `id_4242…`, `4242.4242…`, double spaces, `%20`,
+ * en-dashes (audit T07 F4, T19 T12-F9). Any digit run of that length with up
+ * to three separator characters between digits, not touching another digit.
+ *
+ * What survives untouched: transaction hashes, UUIDs and other long hex
+ * strings (they contain digit runs by chance), and any number under 12 digits.
+ *
+ * `cards: "any"` (default) masks every 12–19 digit run — right for error text
+ * and anything handed to the model, where a stray number is worth nothing and
+ * a leaked card is. `cards: "valid"` masks only runs that can BE a card number
+ * (13–19 digits, first digit 2–6, Luhn passes) — for an order number whose
+ * digits are the point.
  */
-export function redactCardData(text: string): string {
+const PAN_SEPARATOR = String.raw`(?:%20|[\s._\-‐-―−]){0,3}`;
+const PAN_OR_HEX = new RegExp(
+    // group 1 = keep: a UUID, or 32+ hex characters with at least one letter
+    String.raw`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?<![0-9a-f])(?=[0-9]*[a-f])[0-9a-f]{32,}(?![0-9a-f]))` +
+    String.raw`|(?<!\d)\d(?:${PAN_SEPARATOR}\d){11,18}(?!\d)`,
+    "gi",
+);
+// cvv=123 · "cvv":"123" · 'cvc': '123' · security_code: 123 · _cvv_123
+const CVV_PAIR = new RegExp(
+    String.raw`(?<![a-z0-9])(cvv2?|cvc2?|security[\s_-]?code)(?![a-z])(?:%20|%22|%3a|%3d|[\s"'=:_>-]){0,6}\d{3,4}(?!\d)`,
+    "gi",
+);
+
+/** Luhn checksum — every real card number passes it; 9 in 10 random digit runs do not. */
+function passesLuhn(digits: string): boolean {
+    let sum = 0;
+    let double = false;
+    for (let i = digits.length - 1; i >= 0; i--) {
+        let d = digits.charCodeAt(i) - 48;
+        if (double) { d *= 2; if (d > 9) d -= 9; }
+        sum += d;
+        double = !double;
+    }
+    return sum % 10 === 0;
+}
+
+export function redactCardData(text: string, opts: { cards?: "any" | "valid" } = {}): string {
     if (!text) return text;
+    const validOnly = opts.cards === "valid";
     return text
         .normalize("NFKC")
-        // PAN: 12-19 digits, allowing spaces or dashes between groups
-        .replace(/\b(?:\d[ -]?){12,19}\b/g, "[PAN_REDACTED]")
-        // CVV mentioned next to a 3-4 digit number
-        .replace(/\b(cvv|cvc|security code)\b\s*:?\s*\d{3,4}/gi, "$1 [REDACTED]");
+        .replace(PAN_OR_HEX, (match: string, hex: string | undefined) => {
+            if (hex) return match;
+            if (validOnly) {
+                // "%20" is a separator here, not two digits of the number.
+                const digits = match.replace(/%20/gi, "").replace(/\D/g, "");
+                if (digits.length < 13 || !/^[2-6]/.test(digits) || !passesLuhn(digits)) return match;
+            }
+            return "[PAN_REDACTED]";
+        })
+        .replace(CVV_PAIR, "$1 [REDACTED]");
+}
+
+/**
+ * Remove THIS card's own values from a text — whatever is glued between the
+ * digits — then run the general redaction. Used on every string the checkout
+ * bridge hands back: the pattern above cannot know that a lone 3-digit number
+ * is the CVV, but the bridge does.
+ */
+export function scrubCardValues(
+    text: string,
+    secrets: { number?: string; cvv?: string },
+    opts: { cards?: "any" | "valid" } = {}
+): string {
+    if (!text) return text;
+    let out = text.normalize("NFKC");
+    const pan = (secrets.number || "").replace(/\D/g, "");
+    if (pan.length >= 12) {
+        out = out.replace(new RegExp(pan.split("").join("(?:%20|[^0-9]){0,3}"), "g"), "[PAN_REDACTED]");
+    }
+    const cvv = (secrets.cvv || "").replace(/\D/g, "");
+    if (cvv.length >= 3) {
+        out = out.replace(new RegExp(`(?<!\\d)${cvv}(?!\\d)`, "g"), "[REDACTED]");
+    }
+    return redactCardData(out, opts);
 }
 
 /** First 6 digits of a PAN — safe to log (BIN is not cardholder data). */

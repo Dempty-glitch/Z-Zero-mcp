@@ -7,7 +7,7 @@
 //   - cancelTokenRemote() → on-chain USDC refund back to the user's Base wallet
 
 import type { CardData, PaymentToken } from "./types.js";
-import { getPassportKey, hasPassportKey } from "./lib/key-store.js";
+import { getPassportKey, hasPassportKey, ensureKeyReady, recoverFromRejectedKey } from "./lib/key-store.js";
 import { resolveApiBaseUrl } from "./lib/api-base.js";
 
 const API_BASE_URL = resolveApiBaseUrl();
@@ -26,7 +26,27 @@ if (!hasPassportKey()) {
 // HTTP helpers (same as api_backend.ts to call Dashboard API)
 // ──────────────────────────────────────────────────────────────────────────────
 
-async function apiRequest(endpoint: string, method: string = 'GET', body: any = null) {
+// Every authenticated call: first make sure a config key has been rotated
+// (lib/key-store.ts); on a 401 from a stored key, fall back once to a newer key
+// in the MCP config.
+async function withKey<T>(call: () => Promise<T>): Promise<T> {
+    await ensureKeyReady();
+    const first: any = await call();
+    if (first?.error === "AUTH_REQUIRED" && first?.status === 401 && await recoverFromRejectedKey()) {
+        return call();
+    }
+    return first;
+}
+
+function apiRequest(endpoint: string, method: string = "GET", body: any = null) {
+    return withKey(() => apiRequestOnce(endpoint, method, body));
+}
+
+function internalApiRequest(endpoint: string, method: string, body: any) {
+    return withKey(() => internalApiRequestOnce(endpoint, method, body));
+}
+
+async function apiRequestOnce(endpoint: string, method: string = "GET", body: any = null) {
     const PASSPORT_KEY = getPassportKey();  // ✅ Hot-swap: read key dynamically each request
     if (!PASSPORT_KEY) {
         return { error: "AUTH_REQUIRED", message: "Z_ZERO_API_KEY is missing." };
@@ -92,7 +112,7 @@ function httpError(res: Response, err: any) {
     };
 }
 
-async function internalApiRequest(endpoint: string, method: string, body: any) {
+async function internalApiRequestOnce(endpoint: string, method: string, body: any) {
     // Auth is the Bearer Passport Key — the server dropped the x-internal-secret
     // gate on /resolve and /burn (redundant to per-user token ownership, Jul 2026).
     // The old client-side CONFIG_ERROR check here broke execute_payment for every

@@ -1,3 +1,7 @@
+// Pages are served from http://127.0.0.1:<port>: the owner's explicit local-test opt-in
+// (1.11 otherwise types a card only on https, default port).
+process.env.Z_ZERO_ALLOW_LOCAL_CHECKOUT = "1";
+
 import { createServer } from "node:http";
 import { fillCheckoutForm } from "../dist/playwright_bridge.js";
 

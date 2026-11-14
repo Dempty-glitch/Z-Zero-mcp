@@ -14,7 +14,7 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -34,6 +34,11 @@ const server = createServer((req, res) => {
     if (pastedDeadOnServer && bearer === PASTED) {        // key dán đã bị rotate → server từ chối ở MỌI route
         res.writeHead(401, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "AUTH_REQUIRED" })); return;
     }
+    if (req.url?.startsWith("/api/keys/rotate") && bearer === OLD) {
+        // 1.11: the config key (OLD) is itself rotated on connect. Answer with OLD so it
+        // stays "the previous key" these scenarios are about.
+        res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ new_key: OLD })); return;
+    }
     if (req.url?.startsWith("/api/keys/rotate")) {
         if (mode === "rotate_commit_then_drop") { pastedDeadOnServer = true; req.socket.destroy(); return; }
         if (mode === "rotate_drop") { req.socket.destroy(); return; }
@@ -50,7 +55,7 @@ async function runScenario(m: Mode, calls = 1) {
     mode = m; seen.length = 0; pastedDeadOnServer = false;
     const home = mkdtempSync(join(tmpdir(), "zz-w2a-"));
     const child = spawn("node", ["dist/index.js"], {
-        env: { ...process.env, HOME: home, Z_ZERO_API_BASE_URL: `http://127.0.0.1:${port}`, Z_ZERO_API_KEY: OLD },
+        env: { ...process.env, HOME: home, Z_ZERO_API_BASE_URL: `http://127.0.0.1:${port}`, Z_ZERO_ALLOW_CUSTOM_API: "1", Z_ZERO_API_KEY: OLD },
         stdio: ["pipe", "pipe", "pipe"],
     });
     child.stderr.on("data", () => {});
@@ -83,8 +88,9 @@ async function runScenario(m: Mode, calls = 1) {
     await rpc("tools/call", { name: "check_balance", arguments: { card_alias: "x" } });   // call sau → Bearer nào?
     const after = [...seen].reverse().find((s) => s.path.startsWith("/api/wallet/balance") && s.bearer !== PASTED) ?? seen[seen.length - 1];
     const bearerAfter = seen[seen.length - 1]?.bearer;
-    const credFile = join(home, ".z-zero", "credentials");
-    const cred = existsSync(credFile) ? readFileSync(credFile, "utf8") : "";
+    // 1.11: one credentials file per API host (credentials-127.0.0.1_<port> here).
+    const credDir = join(home, ".z-zero");
+    const cred = existsSync(credDir) ? readdirSync(credDir).filter((f) => f.startsWith("credentials")).map((f) => readFileSync(join(credDir, f), "utf8")).join("\n") : "";
     child.kill();
     return { isError, setText, firstText, bearerAfter, cred, seen: [...seen] };
 }

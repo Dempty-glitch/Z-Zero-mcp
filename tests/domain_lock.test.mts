@@ -25,7 +25,15 @@ test("live page: the store or a hosted payment page it handed off to", () => {
     assert.equal(checkPaymentPage("https://meanblvd.com/thanks", L).ok, true);
     assert.equal(checkPaymentPage("https://checkout.stripe.com/c/pay/x", L).ok, true);
     assert.equal(checkPaymentPage("https://www.paypal.com/checkoutnow", L).ok, true);
-    assert.equal(checkPaymentPage("https://x.myshopify.com/checkouts/1", L).ok, true);
+    // A stranger's Shopify store is not a payment page for this store (audit T11 F1).
+    assert.equal(checkPaymentPage("https://x.myshopify.com/checkouts/1", L).ok, false);
+    assert.equal(checkPaymentPage("https://meanblvd.myshopify.com/c/1", "meanblvd.myshopify.com").ok, true);
+    // https, default port, no *.localhost (audit T11 F3/F6, T19).
+    assert.equal(checkPaymentPage("http://meanblvd.com/x", L).ok, false);
+    assert.equal(checkPaymentPage("https://meanblvd.com:8443/x", L).ok, false);
+    assert.equal(checkPaymentPage("https://meanblvd.localhost/x", "meanblvd.localhost").ok, false);
+    // A parent domain is not covered by a subdomain lock (audit T11 F5).
+    assert.equal(checkCheckoutUrl("https://gumroad.com/l/x", "alice.gumroad.com").ok, false);
     assert.equal(checkPaymentPage("https://pay-meanblvd.com/x", L).ok, false);
 });
 

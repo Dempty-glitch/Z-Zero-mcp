@@ -33,6 +33,12 @@ const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
+        // 1.11 rotates the config key on first use: answer it, it is not an issuance.
+        if (req.url?.startsWith("/api/keys/rotate")) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ new_key: "zk_test_backtest_rotated" }));
+            return;
+        }
         const body = JSON.parse(raw || "{}");
         const key: string | undefined = body.idempotency_key;
         seenKeys.push(key);
@@ -77,8 +83,15 @@ const server = createServer((req, res) => {
 await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
 const port = (server.address() as AddressInfo).port;
 
+// Fake HOME: the key store must never read or write the real ~/.z-zero, and the
+// custom API must be switched on explicitly (1.11) or calls would go to z-zero.xyz.
+const { mkdtempSync } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const { join } = await import("node:path");
+process.env.HOME = mkdtempSync(join(tmpdir(), "zz-w3a-"));
 process.env.Z_ZERO_API_BASE_URL = `http://127.0.0.1:${port}`;
-process.env.Z_ZERO_API_KEY = process.env.Z_ZERO_API_KEY || "zk_test_backtest";
+process.env.Z_ZERO_ALLOW_CUSTOM_API = "1";
+process.env.Z_ZERO_API_KEY = "zk_test_backtest";
 const { issueTokenRemote } = await import("../dist/base_backend.js");
 
 let pass = 0, fail = 0;

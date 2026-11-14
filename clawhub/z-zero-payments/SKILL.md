@@ -68,7 +68,7 @@ This skill is deliberately boring about money. Four boundaries matter:
 3. Navigate the checkout until the **final total including shipping** is visible.
 4. **Compare the page with what was actually asked for** — same items, quantity, variant, destination. If anything differs, stop here: no token has been issued, so a mismatch caught now costs nothing.
 5. `request_human_approval` with item, merchant, and exact total. Wait.
-6. On approval, choose the SOP's route. `auto_pay_checkout` is the autonomous crypto/card router. For the manual card path, call `request_payment_token` with `cart`, `criteria`, and `ship_to`; the server signs the criteria the agent records as the owner's instruction.
+6. On approval, choose the SOP's route. `auto_pay_checkout` is the one-call card checkout for a page whose total is already visible; it requires `max_amount` (USD, the most the owner agreed to — convert other currencies yourself) and never issues a larger card. For the manual card path, call `request_payment_token` with `cart`, `criteria`, and `ship_to`; the server signs the criteria the agent records as the owner's instruction.
 7. **Call `execute_payment` the first time without `recheck`.** It returns `status: "purpose_check"` and the locked criteria. Nothing is charged, no browser is opened, and no card data is fetched.
 8. Look at the final page again. **Call `execute_payment` a second time** with `recheck.page_shows` and `recheck.decision`:
    - `pause` — use when anything differs; no card is filled, and the token remains active and refundable.

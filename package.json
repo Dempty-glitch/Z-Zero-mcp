@@ -1,6 +1,6 @@
 {
     "name": "z-zero-mcp-server",
-    "version": "1.10.4",
+    "version": "1.11.0",
     "description": "Z-ZERO MCP Server — Secure JIT Virtual Card Payment tools for AI Agents (Claude, Cursor, AutoGPT) — Real Single-Use Virtual Cards, settled in USDC on Base",
     "main": "dist/index.js",
     "bin": {
@@ -13,6 +13,7 @@
         "test:mock-checkout": "npm run build && node --experimental-strip-types tests/backtest_mock_checkout_e2e.mts",
         "test:ucp-offline": "npm run build && node --experimental-strip-types --test tests/ucp_bridge_offline.test.mts",
         "test:domain-lock": "npm run build && node --experimental-strip-types --test tests/domain_lock.test.mts",
+        "test:audit-wave-m": "npm run build && bash tests/audit-wave-m/run.sh",
         "test:ucp-dryrun:live": "npm run build && node --experimental-strip-types tests/ucp_dryrun_meanblvd.mts",
         "test:ucp-smoke:live": "npm run build && node --experimental-strip-types tests/ucp_smoke_colourpop.mts",
         "prepublishOnly": "npm run build"

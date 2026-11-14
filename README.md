@@ -14,7 +14,7 @@ npx z-zero-mcp-server
 
 **What makes it different:**
 - 🔐 **Zero-trust by design** — the AI never sees PAN, CVV, or expiry. Card data exists only in RAM, injected via Playwright at the last step, then wiped.
-- ⛽ **Gasless USDC on Base** — auto-detects crypto checkout (EIP-681) and settles as a gasless USDC transfer sponsored by Coinbase Paymaster. The agent holds only USDC — no ETH, no gas UX. **Opt-in:** off unless you set `Z_ZERO_ENABLE_WEB3_PAY=1`, because an on-chain send to an address read off a web page cannot be reversed.
+- ⛽ **Funded in USDC on Base** — the agent's wallet holds USDC (gasless, sponsored by Coinbase Paymaster); every purchase is paid with a single-use card funded from it. Z-Zero never sends crypto to an address it reads off a web page.
 - 💳 **JIT single-use virtual cards** — amount-locked, 1-hour TTL, burned after a single use. Fiat fallback for the rest of the web.
 - 🧠 **Smart Routing + checkout intelligence** — `get_merchant_hints` serves platform-specific checkout playbooks (Shopify, Etsy, WooCommerce…).
 - ✍️ **Linked purpose + outcome** — the server signs the criteria the agent records at issuance. Before checkout, `execute_payment` hands those criteria back and requires a second call with `go` or `pause`; a confirmed purchase seals the answer into the signed receipt. The record is inspectable without pretending the platform judged whether the agent told the truth.
@@ -71,8 +71,6 @@ npx z-zero-mcp-server
 
 *The AI agent never touches card data — it only handles single-use tokens. Real card details are injected by Playwright at the last step and wiped from RAM.*
 
-> **Crypto checkout branch:** when `auto_pay_checkout` detects a crypto-native checkout (EIP-681), it skips the card flow entirely and settles as a **gasless USDC transfer on Base** — see above. Off by default; enable with `Z_ZERO_ENABLE_WEB3_PAY=1`.
-
 ---
 
 ## Why Z-ZERO
@@ -115,14 +113,16 @@ Get your Passport Key at: **[z-zero.xyz/dashboard/agents](https://z-zero.xyz/das
 
 ---
 
-## Security: rotate-on-connect (v1.5.0+)
+## Security: rotate-on-connect (v1.5.0+; config keys too since v1.11.0)
 
-The key you copy from the dashboard (or paste into a chat) is only a **one-time bootstrap ticket**.
-The moment your agent connects with it, the MCP server silently swaps it for a fresh key:
+The key you copy from the dashboard is only a **one-time bootstrap ticket** — whether you paste it into a chat (`set_api_key`) or your agent writes it into the MCP config as `Z_ZERO_API_KEY`.
+The moment the MCP server first uses it, it silently swaps it for a fresh key:
 
 - The fresh key travels **server → MCP process → disk** and is stored in `~/.z-zero/credentials` (mode `0600`). It never appears in any LLM conversation, tool result, or config file.
 - The pasted key is **dead within seconds** — a copy living in a chat transcript, clipboard, or screenshot can no longer be used by anyone.
-- On startup the MCP loads the key from `~/.z-zero/credentials` first; the `Z_ZERO_API_KEY` env var is only a bootstrap fallback.
+- On startup the MCP loads the key from `~/.z-zero/credentials`. If you later put a **different** key in `Z_ZERO_API_KEY`, that new key wins and is rotated in turn.
+- `set_api_key` will not replace a working key with one from a **different account** (a page could tell an agent to "connect" a stranger's key, whose deposit address would then be shown to you). To switch accounts on purpose, revoke the current key on the dashboard first.
+- `Z_ZERO_API_BASE_URL` (your own Z-Zero server) is ignored unless you also set `Z_ZERO_ALLOW_CUSTOM_API=1`; a custom server gets its own key file and never receives your z-zero.xyz key.
 
 **One key = one machine.** All agents on the same machine (Claude Desktop, Claude Code, Cursor, …) share the same MCP install and the same credentials file — install once, every agent can pay. Connecting a *different* machine with a copied key rotates it, which instantly disconnects the original machine. That is deliberate: it blocks key sharing **and** doubles as an intrusion alarm — if your agent suddenly fails auth, someone else used your key; go to the dashboard and revoke.
 
@@ -162,7 +162,7 @@ Older self-hosted backends without the rotate endpoint keep working — the past
 
 | Tool | Description |
 |------|-------------|
-| `auto_pay_checkout` | Fully autonomous checkout — issues a JIT card and completes payment (crypto checkout only with `Z_ZERO_ENABLE_WEB3_PAY=1`) |
+| `auto_pay_checkout` | One-call checkout for a page whose total is already visible. **Requires `max_amount`** (USD, the most the owner agreed to; the agent converts other currencies). The card is never larger; on a USD page a visible total above it, or no readable total, stops before any card is issued. Card only |
 | `get_merchant_hints` | Fetch platform-specific checkout playbook (pre-steps + selectors) from Knowledge Base |
 | `report_checkout_fail` | Report a failed checkout with a **structured `failure_class`** (14-class enum) — feeds the self-healing loop |
 | `verify_receipt` | Verify a signed receipt by id — prove a purchase happened instead of claiming it |
@@ -322,4 +322,4 @@ Cancel an unused token (refunds balance).
 
 ---
 
-*Security: the key you paste is never kept — it rotates the moment your agent first connects, and the fresh key lives only in a local owner-only file (`~/.z-zero/credentials`, mode 0600), never in any LLM conversation. Card data exists only in volatile RAM during execution.*
+*Security: the key you paste or put in the MCP config is never kept — it rotates the moment your agent first connects, and the fresh key lives only in a local owner-only file (`~/.z-zero/credentials`, mode 0600), never in any LLM conversation. Card data exists only in volatile RAM during execution.*

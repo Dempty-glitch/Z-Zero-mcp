@@ -20,6 +20,16 @@ npx z-zero-mcp-server
 - ✍️ **Linked purpose + outcome** — the server signs the criteria the agent records at issuance. Before checkout, `execute_payment` hands those criteria back and requires a second call with `go` or `pause`; a confirmed purchase seals the answer into the signed receipt. The record is inspectable without pretending the platform judged whether the agent told the truth.
 - 🔄 **Structured failure labels** — failed checkouts are labeled with a fixed 14-class `failure_class` (automatically, not only when an agent remembers to report) and stored as evidence for the merchant knowledge base. Facts are promoted into shared hints only after a later outcome or review verifies them.
 
+## Built for open agents
+
+Lending an agent your own card works for one assistant shopping for one person. Most agents being built have no card to borrow. Z-ZERO is for:
+
+- **Frontier assistants** — Claude, Cursor, or any MCP client you already use.
+- **Open-source and self-hosted agents** — frameworks that run outside any platform's wallet.
+- **Agents companies build for their own work** — procurement, operations, research, support.
+
+Each agent gets a bounded budget in USDC, kept apart from your main account, and spends it one exact-amount card at a time. If something goes wrong, the loss stops at one purchase. The reasoning: [The Bridge Thesis §04](https://z-zero.xyz/thesis#budget).
+
 ---
 
 ## Live on Base Mainnet
